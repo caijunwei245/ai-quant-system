@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Data cache
+data/cache/
+*.pkl
+
+# Logs
+logs/
+
+# Output
+output/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (if any)
+# config/settings.yaml  # uncomment if it contains secrets
+
+# Models - only track metadata, not large model weights
+models/
+!models/*.json

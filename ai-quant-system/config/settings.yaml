@@ -1,0 +1,259 @@
+# ============================================================
+# AI量化交易系统 - 全局配置
+# 2026年实战组合方案配置
+# ============================================================
+
+# 系统基础配置
+system:
+  name: "AI Quant Trading System v2026"
+  version: "1.0.0"
+  log_level: "INFO"
+  work_dir: "../"
+  data_dir: "../data"
+  model_dir: "../models"
+  log_dir: "../logs"
+
+# 数据源配置
+data:
+  # A股数据源
+  primary_source: "akshare"  # akshare / yfinance / csv
+  akshare:
+    enabled: true
+    timeout: 30
+  yfinance:
+    enabled: true
+    timeout: 30
+  # CSV本地数据
+  csv:
+    enabled: false
+    path: "../data/csv"
+
+  # Tushare MCP 数据源
+  tushare_mcp:
+    enabled: false  # 需升级 token 权限后启用
+    token_env_var: "TUSHARE_TOKEN"  # Token 从环境变量读取
+    url: "https://api.tushare.pro/mcp/"
+    timeout: 30
+    retry_delay: 4
+
+# 数据完整性校验配置
+validation:
+  enabled: true
+  tolerance:
+    close_pct: 0.005     # 收盘价允许 ±0.5% 偏差
+    volume_pct: 0.01     # 成交量允许 ±1% 偏差
+    open_pct: 0.005      # 开盘价允许 ±0.5% 偏差
+    high_low_pct: 0.005  # 最高/最低价允许 ±0.5% 偏差
+  auto_save: true        # 校验通过后自动保存本地
+  sample_size: 10        # 批量验证抽样数量
+# 初筛层配置 (LightGBM + Qlib)
+screening:
+  enabled: true
+  # 全市场范围
+  universe: "all_a_share"  # all_a_share /沪深300 / 中证500 / 创业板
+  # 因子配置
+  factors:
+    # 技术指标因子
+    technical:
+      - name: "ma_5"
+        type: "moving_average"
+        params: {period: 5}
+      - name: "ma_20"
+        type: "moving_average"
+        params: {period: 20}
+      - name: "ma_60"
+        type: "moving_average"
+        params: {period: 60}
+      - name: "rsi_14"
+        type: "rsi"
+        params: {period: 14}
+      - name: "macd_hist"
+        type: "macd_histogram"
+      - name: "boll_position"
+        type: "bollinger_position"
+      - name: "atr_14"
+        type: "atr"
+        params: {period: 14}
+      - name: "volume_ratio"
+        type: "volume_ratio"
+        params: {period: 5}
+      - name: "turnover_rate"
+        type: "turnover_rate"
+    # 基本面因子
+    fundamental:
+      - name: "pe_ratio"
+        type: "pe_ratio"
+      - name: "pb_ratio"
+        type: "pb_ratio"
+      - name: "roe"
+        type: "roe"
+      - name: "revenue_growth"
+        type: "revenue_growth"
+      - name: "net_profit_growth"
+        type: "net_profit_growth"
+    # 量价因子
+    price_volume:
+      - name: "amihud"
+        type: "amihud_illiquidity"
+      - name: "volatility_20"
+        type: "realized_volatility"
+        params: {window: 20}
+      - name: "skewness_20"
+        type: "skewness"
+        params: {window: 20}
+      - name: "kurtosis_20"
+        type: "kurtosis"
+        params: {window: 20}
+  # LightGBM模型配置
+  lightgbm:
+    learning_rate: 0.05
+    n_estimators: 500
+    max_depth: 6
+    num_leaves: 63
+    min_child_samples: 100
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+    verbose: -1
+    n_jobs: -1
+  # 选股策略
+  selection:
+    top_k: 50              # 选前50只
+    min_score: 0.3         # 最低预测分
+    industry_diversify: true  # 行业分散
+    max_industry_weight: 0.3  # 单行业最大权重
+
+# 精研层配置 (TradingAgents)
+research:
+  enabled: true
+  # NLP模型配置
+  nlp:
+    model_name: "hfl/chinese-roberta-wwm-ext"  # 中文预训练模型
+    max_length: 512
+    batch_size: 32
+    # LLM 接入配置 (可选，用于替换关键词情感分析)
+    llm:
+      provider: "lm-studio"    # lm-studio / deepseek / lm-stadio / mock
+      model: null
+      endpoint: "http://127.0.0.1:8000/generate"  # lm-studio HTTP 服务（如有）
+      use_gpu: true
+      timeout: 30
+  # 研报分析
+  report_analysis:
+    enabled: true
+    min_sentiment_score: 0.2  # 最低情感分数
+    keywords:
+      positive: ["增长", "突破", "利好", "景气", "景气度", "超预期"]
+      negative: ["亏损", "退市", "处罚", "调查", "暴雷", "减持", "质押"]
+  # 新闻分析
+  news_analysis:
+    enabled: true
+    sources: ["eastmoney", "cls", "sina_finance"]
+    lookback_days: 30
+    min_news_count: 5
+  # 排除规则
+  exclusion:
+    st_stocks: true       # 排除ST股
+    suspended: true       # 排除停牌股
+    newly_ipo: true       # 排除次新股(上市<60天)
+    high_pledged: true    # 排除高质押股(质押>30%)
+    regulatory: true      # 排除监管中股票
+
+# 执行层配置 (PPO强化学习)
+execution:
+  enabled: true
+  # PPO代理配置
+  ppo:
+    policy: "MlpPolicy"
+    learning_rate: 3e-4
+    n_steps: 2048
+    batch_size: 64
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+    device: "auto"
+  # 仓位管理
+  position:
+    max_positions: 20         # 最大持仓数
+    min_position: 0.02        # 单只最小仓位(2%)
+    max_position: 0.10        # 单只最大仓位(10%)
+    equal_weight: 0.10        # 等权仓位(10%)
+    rebalance_freq: "daily"   # 调仓频率: daily / weekly
+  # 状态空间定义
+  state_space:
+    features:
+      - "portfolio_value"     # 组合净值
+      - "position_pnl"        # 持仓盈亏
+      - "market_regime"       # 市场状态
+      - "volatility"          # 波动率
+      - "momentum"            # 动量指标
+      - "volume_profile"      # 成交量分布
+    window: 20               # 历史窗口
+
+# 风控层配置 (DoubleEnsemble)
+risk:
+  enabled: true
+  # DoubleEnsemble配置
+  double_ensemble:
+    n_models: 5              # 集成模型数量
+    base_estimator: "lightgbm"
+    max_depth: 4             # 浅树防止过拟合
+    min_samples_leaf: 200    # 大叶子降低方差
+    bootstrap: true
+    oob_score: true
+  # 风险指标
+  metrics:
+    max_drawdown: 0.15       # 最大回撤阈值(15%)
+    daily_loss_limit: 0.03   # 单日亏损限额(3%)
+    var_confidence: 0.95     # VaR置信水平
+    tracking_error: 0.10     # 跟踪误差上限
+  # 仓位风控
+  position_risk:
+    max_single_position: 0.10   # 单票最大仓位
+    max_industry_position: 0.30 # 单行业最大仓位
+    max_correlation: 0.7        # 最大相关性
+    stop_loss: -0.08            # 止损线(-8%)
+    trailing_stop: -0.05        # 移动止损(-5%)
+  # 市场风控
+  market_risk:
+    circuit_breaker: true      # 熔断机制
+    volatility_target: 0.15    # 波动率目标
+    risk_off_threshold: 0.25   # 风控退出阈值
+
+# 回测配置
+backtest:
+  enabled: true
+  start_date: "2024-01-01"
+  end_date: "2025-12-31"
+  initial_capital: 1000000  # 初始资金100万
+  benchmark: "000300.SH"    # 沪深300
+  commission: 0.0003        # 佣金率(万三)
+  slippage: 0.001           # 滑点(0.1%)
+  stamp_tax: 0.001          # 印花税(万1,卖出)
+
+# 输出配置
+output:
+  report:
+    enabled: true
+    format: ["html", "pdf"]
+    path: "../output/reports"
+  trade_log:
+    enabled: true
+    path: "../output/trades"
+  performance:
+    enabled: true
+    metrics:
+      - "total_return"
+      - "annual_return"
+      - "sharpe_ratio"
+      - "max_drawdown"
+      - "win_rate"
+      - "profit_loss_ratio"
+      - "calmar_ratio"
+      - "sortino_ratio"
