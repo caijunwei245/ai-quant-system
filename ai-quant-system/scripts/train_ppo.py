@@ -10,7 +10,11 @@ trains a stable-baselines3 PPO model. It saves the model under ../models/ppo_mod
 """
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Ensure the project root is on sys.path when running from scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 from data.fetcher import DataFetcher

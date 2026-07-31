@@ -11,7 +11,11 @@ After training it saves model artifacts under ../models.
 """
 import argparse
 import logging
+import sys
 from pathlib import Path
+
+# Ensure the project root is on sys.path when running from scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from layers.screening import ScreeningLayer
 from utils.config_loader import load_config

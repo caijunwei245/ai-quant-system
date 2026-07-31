@@ -12,7 +12,11 @@ wrapper intended for integration into a serving layer (Flask/FastAPI) later.
 """
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# Ensure the project root is on sys.path when running from scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from layers.execution import ExecutionLayer
 
