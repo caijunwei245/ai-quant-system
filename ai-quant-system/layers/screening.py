@@ -564,8 +564,9 @@ class ScreeningLayer:
 
         logger.info("开始训练LightGBM模型...")
 
-        # 构建训练数据
-        X, y, stock_codes, feature_names, sample_dates = self.build_training_dataset(valid_stocks, all_features, all_labels, lookback_days=30, min_samples=100)
+        # 构建训练数据 (lookback_days 可配置, 默认 30 个交易日窗口)
+        lookback_days = int(self.lgb_config.get("lookback_days", 30))
+        X, y, stock_codes, feature_names, sample_dates = self.build_training_dataset(valid_stocks, all_features, all_labels, lookback_days=lookback_days, min_samples=100)
 
         if X.size == 0 or y.size == 0:
             logger.warning("未能构建有效训练集,跳过训练")
@@ -685,6 +686,7 @@ class ScreeningLayer:
             "feature_importance": importance,
             "params": params,
             "train_date": datetime.now().strftime("%Y-%m-%d"),
+            "samples": int(X.shape[0]),
             "cv": cv_result,
         }
 
@@ -858,9 +860,16 @@ class ScreeningLayer:
 
         model_obj = self.model.get("model_obj", self.model) if isinstance(self.model, dict) else self.model
 
-        if hasattr(model_obj, "save_model"):
-            model_obj.save_model(self.model_dir / "screening_model.txt")
+        # LightGBM 4.x: LGBMClassifier exposes the booster via `.booster_`
+        # and only the Booster has `save_model`. Fall back gracefully.
+        booster = getattr(model_obj, "booster_", None) or (
+            model_obj if hasattr(model_obj, "save_model") else None
+        )
+        if booster is not None and hasattr(booster, "save_model"):
+            booster.save_model(self.model_dir / "screening_model.txt")
             logger.info("模型已保存到: screening_model.txt")
+        else:
+            logger.warning("无法保存模型: 未找到可用的 Booster 对象")
 
     def load_model(self) -> bool:
         """加载模型"""

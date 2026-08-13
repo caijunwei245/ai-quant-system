@@ -122,9 +122,26 @@ python main.py --mode screening --date 2026-07-21 --top-k 50
 
 ### 3.1 训练 Screening 模型
 
-```bash
-python scripts/train_screening.py --date 2026-07-21 --universe hs300
-```
+初筛层 (LightGBM) 支持两种训练数据源：
+
+1. **面板模式（默认，离线）** —— 从已准备的 CSI300 日线面板训练，无需联网：
+
+   ```bash
+   # 默认读取 data/csi300_daily_2010_2026.csv.gz（约 20MB，需从项目网盘下载，见 data/README.md）
+   python scripts/train_screening.py
+   # 没有完整数据集时，自动回退到提交的小样本做冒烟测试
+   python scripts/train_screening.py --panel data/csi300_sample.csv
+   ```
+
+   关键参数：`--lookback-days 0`（默认，使用全部历史）、`--min-cv-auc`（CV AUC 门槛，演示默认 0.0，生产建议 ≥0.60）。
+
+2. **实时模式** —— 通过 `DataFetcher`（需网络 / AKShare）拉取数据并跑完整 `run_screening`：
+
+   ```bash
+   python scripts/train_screening.py --live --date 2026-07-21 --universe hs300
+   ```
+
+训练产物（模型元数据 / CV 报告）写入 `models/`；大体积权重 `screening_model.txt` 不纳入版本库。
 
 ### 4. 运行回测
 

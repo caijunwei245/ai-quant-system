@@ -34,6 +34,13 @@ Thumbs.db
 # Config with secrets (if any)
 # config/settings.yaml  # uncomment if it contains secrets
 
-# Models - only track metadata, not large model weights
-models/
+# Large raw datasets (download from Project Drive; see ai-quant-system/data/README.md).
+# The full CSI300 panel is ~20MB and exceeds GitHub API limits; the small
+# committed sample (ai-quant-system/data/csi300_sample.csv) is NOT ignored.
+ai-quant-system/data/csi300_daily_2010_2026.csv.gz
+ai-quant-system/data/*.csv.gz
+
+# Model artifacts: keep metadata / reports, ignore large weights & plots
+models/*
 !models/*.json
+!models/*.html
