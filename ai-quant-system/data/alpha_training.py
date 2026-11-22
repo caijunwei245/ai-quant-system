@@ -136,3 +136,34 @@ def rank_metrics(sample_dates, raw_returns, scores, n_quantiles=5):
         "top_bottom_return": float(np.mean(spreads)) if spreads else None,
         "n_dates": len(daily_ic),
     }
+
+
+def split_development_oos(sample_dates, trading_calendar, oos_fraction=0.2,
+                          forward_days=5, embargo_days=2):
+    """Reserve the latest date block as untouched OOS and purge its label overlap."""
+    dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+    calendar = pd.DatetimeIndex(pd.to_datetime(trading_calendar)).normalize()
+    if dates.isna().any() or calendar.isna().any():
+        raise ValueError("sample dates and trading calendar must be valid")
+    if calendar.has_duplicates or not calendar.is_monotonic_increasing:
+        raise ValueError("trading calendar must be unique and sorted")
+    ranks = calendar.get_indexer(dates)
+    if (ranks < 0).any():
+        raise ValueError("sample dates missing from trading calendar")
+    fraction = float(oos_fraction)
+    if not 0.1 <= fraction <= 0.4:
+        raise ValueError("oos_fraction must be between 0.10 and 0.40")
+    unique_dates = dates.unique().sort_values()
+    split_at = int(np.floor(len(unique_dates) * (1.0 - fraction)))
+    if split_at <= 0 or split_at >= len(unique_dates):
+        raise ValueError("not enough distinct dates for independent OOS split")
+    oos_start = unique_dates[split_at]
+    oos_rank = int(calendar.get_loc(oos_start))
+    dev_mask = (dates < oos_start) & (
+        (ranks + int(forward_days)) < (oos_rank - int(embargo_days))
+    )
+    oos_mask = dates >= oos_start
+    dev_idx, oos_idx = np.flatnonzero(dev_mask), np.flatnonzero(oos_mask)
+    if not len(dev_idx) or not len(oos_idx):
+        raise ValueError("development or OOS split is empty")
+    return dev_idx, oos_idx, oos_start
