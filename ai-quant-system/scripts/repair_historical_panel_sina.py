@@ -70,7 +70,8 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
 
     for idx, code in enumerate(sorted(df["code"].unique()), start=1):
         local_idx = repaired.index[repaired["code"] == code]
-        local = repaired.loc[local_idx].sort_values("date").copy()\n        local["_row_id"] = local.index
+        local = repaired.loc[local_idx].sort_values("date").copy()
+        local["_row_id"] = local.index
         try:
             sina = _load_sina_qfq(code, start, end)
             merged = local[["date", "volume", "amount"]].merge(
