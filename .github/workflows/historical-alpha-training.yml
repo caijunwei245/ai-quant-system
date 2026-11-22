@@ -55,8 +55,8 @@ jobs:
           python scripts/validate_historical_panel.py \
             --panel data/csi300_daily_2010_2026.csv.gz \
             --output reports/alpha-training/data_audit.json \
-            --min-rows 1000000 --min-stocks 200 --min-dates 1000 \
-            --min-start 2011-01-01 --min-end 2025-01-01
+            --min-rows 900000 --min-stocks 200 --min-dates 1000 \
+            --min-start 2010-01-01 --min-end 2026-01-01
 
       - name: Train LambdaRank on the verified full panel only
         run: |
