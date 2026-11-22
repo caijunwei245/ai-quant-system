@@ -12,10 +12,11 @@ on:
       - "ai-quant-system/data/alpha_training.py"
       - "ai-quant-system/data/panel_loader.py"
       - "ai-quant-system/scripts/diagnose_price_adjustment.py"
+      - "ai-quant-system/scripts/repair_historical_panel_sina.py"
       - ".github/workflows/historical-alpha-training.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate-and-train:
@@ -59,6 +60,14 @@ jobs:
             --panel data/csi300_daily_2010_2026.csv.gz \
             --output reports/alpha-training/adjustment_diagnosis.json
 
+      - name: Rebuild OHLC from independent Sina qfq data (fail closed)
+        run: |
+          python scripts/repair_historical_panel_sina.py \
+            --panel data/csi300_daily_2010_2026.csv.gz \
+            --output data/csi300_daily_2010_2026_repaired.csv.gz \
+            --report reports/alpha-training/repair_report.json \
+            --sleep-seconds 0.5
+
       - name: Audit complete historical panel (fail closed)
         run: |
           python scripts/validate_historical_panel.py \
@@ -66,6 +75,16 @@ jobs:
             --output reports/alpha-training/data_audit.json \
             --min-rows 900000 --min-stocks 200 --min-dates 1000 \
             --min-start 2010-12-31 --min-end 2026-01-01
+
+      - name: Commit repaired panel and provenance to PR branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/csi300_daily_2010_2026_repaired.csv.gz reports/alpha-training/repair_report.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Add independently repaired CSI300 historical panel"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
 
       - name: Train LambdaRank on the verified full panel only
         run: |
@@ -84,6 +103,9 @@ jobs:
           from pathlib import Path
           report = json.loads(Path("reports/alpha-training/alpha_training_report.json").read_text())
           assert report["status"] == "success"
+          repair = json.loads(Path("reports/alpha-training/repair_report.json").read_text())
+          assert repair["status"] == "passed"
+          assert repair["stocks_repaired"] == 300
           assert report["data_audit"]["status"] == "passed"
           training = report["training"]
           assert training["cv"]["n_folds"] >= 2
@@ -106,5 +128,6 @@ jobs:
           path: |
             ai-quant-system/reports/alpha-training/
             ai-quant-system/models/
+            ai-quant-system/data/csi300_daily_2010_2026_repaired.csv.gz
           if-no-files-found: warn
           retention-days: 30
