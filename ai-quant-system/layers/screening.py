@@ -333,150 +333,95 @@ class ScreeningLayer:
             report["mean_top_bottom_return"] = float(np.mean(spreads)) if spreads else None
         return report
 
-    def _train_model(
-        self,
-        valid_stocks: List[str],
-        all_features: Dict[str, pd.DataFrame],
-        all_labels: Dict[str, pd.Series]
-    ) -> None:
-        """训练LightGBM模型"""
+    def _train_model(self, valid_stocks, all_features, all_labels) -> None:
+        """Train LambdaRank with purged walk-forward CV and a final untouched OOS period."""
         if not HAS_LIGHTGBM:
-            return
+            raise RuntimeError("LightGBM is required for Alpha Ranker training")
+        from data.alpha_training import rank_metrics
 
-        logger.info("开始训练LightGBM模型...")
+        X, y, raw_returns, stock_codes, feature_names, sample_dates, groups = self.build_training_dataset(
+            valid_stocks, all_features, all_labels,
+            lookback_days=int(self.lgb_config.get("lookback_days", 0)),
+            min_samples=int(self.lgb_config.get("min_samples", 100)),
+        )
+        dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+        start_date, end_date = dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
+        calendar = pd.DatetimeIndex(pd.to_datetime(
+            self.data_fetcher.fetch_trading_calendar(start_date, end_date)
+        )).normalize()
+        ranks = calendar.get_indexer(dates)
+        if (ranks < 0).any():
+            raise ValueError("training sample date missing from exchange trading calendar")
 
-        # 构建训练数据 (lookback_days 可配置, 默认 30 个交易日窗口)
-        lookback_days = int(self.lgb_config.get("lookback_days", 30))
-        X, y, stock_codes, feature_names, sample_dates = self.build_training_dataset(valid_stocks, all_features, all_labels, lookback_days=lookback_days, min_samples=100)
-
-        if X.size == 0 or y.size == 0:
-            logger.warning("未能构建有效训练集,跳过训练")
-            return
-
-        self.feature_names = feature_names
-        logger.info(f"训练数据: {X.shape[0]} samples, {X.shape[1]} features")
-        logger.info(f"正样本比例: {y.mean():.2%}")
-
-        # 验证: 使用 Purged K-Fold + Embargo
-        embargo_days = int(self.lgb_config.get("embargo_days", 2))
+        unique_dates = dates.unique().sort_values()
+        oos_fraction = float(self.lgb_config.get("oos_fraction", 0.2))
+        if not 0.1 <= oos_fraction <= 0.4:
+            raise ValueError("oos_fraction must be between 0.10 and 0.40")
+        split_at = int(np.floor(len(unique_dates) * (1.0 - oos_fraction)))
+        if split_at <= 0 or split_at >= len(unique_dates):
+            raise ValueError("not enough distinct dates for independent OOS split")
+        oos_start = unique_dates[split_at]
+        oos_rank = int(calendar.get_loc(oos_start))
         forward_days = int(self.lgb_config.get("forward_days", 5))
-        n_splits = int(self.lgb_config.get("n_splits", 5))
+        embargo_days = int(self.lgb_config.get("embargo_days", 2))
+        dev_mask = (dates < oos_start) & ((ranks + forward_days) < (oos_rank - embargo_days))
+        oos_mask = dates >= oos_start
+        dev_idx, oos_idx = np.flatnonzero(dev_mask), np.flatnonzero(oos_mask)
+        if len(dev_idx) < int(self.lgb_config.get("min_samples", 100)) or len(oos_idx) < 20:
+            raise ValueError("development or independent OOS sample is too small")
 
-        cv_result = self._purged_kfold_cv(X, y, sample_dates, n_splits=n_splits, embargo_days=embargo_days, forward_days=forward_days)
-        logger.info(f"Purged K-Fold CV 结果: mean_auc={cv_result.get('mean_auc'):.4f}, std={cv_result.get('std_auc'):.4f}, folds={cv_result.get('n_folds')}")
+        cv = self._purged_kfold_cv(
+            X[dev_idx], y[dev_idx], [sample_dates[i] for i in dev_idx],
+            raw_returns[dev_idx], calendar,
+            n_splits=int(self.lgb_config.get("n_splits", 5)),
+            embargo_days=embargo_days, forward_days=forward_days,
+        )
+        if cv["n_folds"] < max(2, int(self.lgb_config.get("n_splits", 5)) - 1):
+            raise RuntimeError(f"insufficient valid purged walk-forward folds: {cv['n_folds']}")
 
-        # 保存 CV 报告到文件（JSON + 简易 HTML）
-        try:
-            report_path = self.model_dir / "screening_cv_report.json"
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(cv_result, f, ensure_ascii=False, indent=2)
-            # 生成带图像的 HTML 报告 (将图像保存在 model_dir 下)
-            html_path = self.model_dir / "screening_cv_report.html"
-            try:
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write('<html><head><meta charset="utf-8"><title>Screening CV Report</title></head><body>')
-                    f.write(f'<h2>Purged K-Fold CV Report</h2>')
-                    f.write(f'<p>mean_auc: {cv_result.get("mean_auc"):.4f}, std: {cv_result.get("std_auc"):.4f}, folds: {cv_result.get("n_folds")}</p>')
-
-                    # 总体ROC图 (如果存在)
-                    overall_img = cv_result.get('overall_roc_image')
-                    if overall_img:
-                        f.write('<h3>Overall ROC</h3>')
-                        f.write(f'<img src="{overall_img}" alt="overall roc" style="max-width:600px; height:auto;"><br>')
-
-                    f.write('<h3>Per-fold details</h3>')
-                    f.write('<table border="1" cellpadding="4"><tr><th>fold</th><th>n_train</th><th>n_val</th><th>train_pos</th><th>train_neg</th><th>val_pos</th><th>val_neg</th><th>auc</th><th>val_start</th><th>val_end</th><th>ROC</th></tr>')
-                    for fold in cv_result.get('folds', []):
-                        f.write('<tr>')
-                        f.write(f"<td>{fold.get('fold')}</td>")
-                        f.write(f"<td>{fold.get('n_train')}</td>")
-                        f.write(f"<td>{fold.get('n_val')}</td>")
-                        f.write(f"<td>{fold.get('train_pos')}</td>")
-                        f.write(f"<td>{fold.get('train_neg')}</td>")
-                        f.write(f"<td>{fold.get('val_pos')}</td>")
-                        f.write(f"<td>{fold.get('val_neg')}</td>")
-                        f.write(f"<td>{fold.get('auc'):.4f}</td>")
-                        f.write(f"<td>{fold.get('val_start')}</td>")
-                        f.write(f"<td>{fold.get('val_end')}</td>")
-                        roc_img = fold.get('roc_image')
-                        if roc_img:
-                            f.write(f"<td><img src=\"{roc_img}\" alt=\"roc_fold_{fold.get('fold')}\" style=\"max-width:200px; height:auto;\"></td>")
-                        else:
-                            f.write('<td>n/a</td>')
-                        f.write('</tr>')
-                    f.write('</table>')
-                    f.write(f'<p>Report generated at: {cv_result.get("generated_at")}</p>')
-                    f.write('</body></html>')
-                logger.info(f"CV报告已保存到: {report_path} 和 {html_path}")
-            except Exception as e:
-                logger.error(f"保存HTML CV报告失败: {e}")
-        except Exception as e:
-            logger.error(f"保存CV报告失败: {e}")
-
-        min_auc = float(self.lgb_config.get("min_cv_auc", 0.60))
-        if cv_result.get("mean_auc", 0) < min_auc:
-            logger.warning(f"Purged CV mean AUC {cv_result.get('mean_auc'):.4f} 小于阈值 {min_auc}, 不建议训练/部署模型")
-            # 仍可选择继续训练，但为了稳健性这里直接返回不训练
-            return
-
-        # LightGBM参数
+        dates_dev = dates[dev_idx]
+        group_sizes = [int((dates_dev == d).sum()) for d in dates_dev.unique()]
         params = {
-            "objective": "binary",
-            "metric": "auc",
-            "boosting_type": "gbdt",
+            "objective": "lambdarank", "metric": "ndcg",
+            "ndcg_eval_at": [5, 10], "verbosity": -1,
             "learning_rate": self.lgb_config.get("learning_rate", 0.05),
             "n_estimators": self.lgb_config.get("n_estimators", 500),
-            "max_depth": self.lgb_config.get("max_depth", 6),
-            "num_leaves": self.lgb_config.get("num_leaves", 63),
-            "min_child_samples": self.lgb_config.get("min_child_samples", 100),
-            "feature_fraction": self.lgb_config.get("feature_fraction", 0.8),
-            "bagging_fraction": self.lgb_config.get("bagging_fraction", 0.8),
-            "bagging_freq": self.lgb_config.get("bagging_freq", 5),
-            "reg_alpha": self.lgb_config.get("reg_alpha", 0.1),
-            "reg_lambda": self.lgb_config.get("reg_lambda", 0.1),
-            "verbose": -1,
-            "random_state": 42,
-            "n_jobs": -1,
+            "num_leaves": self.lgb_config.get("num_leaves", 31),
+            "max_depth": self.lgb_config.get("max_depth", -1),
+            "min_child_samples": self.lgb_config.get("min_child_samples", 30),
+            "random_state": 42, "n_jobs": -1,
         }
+        model = lgb.LGBMRanker(**params)
+        model.fit(X[dev_idx], y[dev_idx], group=group_sizes)
+        oos = rank_metrics(dates[oos_idx], raw_returns[oos_idx], model.predict(X[oos_idx]))
+        min_oos_rank_ic = float(self.lgb_config.get("min_oos_rank_ic", 0.0))
+        if oos["rank_ic"] is None or oos["rank_ic"] < min_oos_rank_ic:
+            raise RuntimeError(
+                f"independent OOS RankIC {oos['rank_ic']} is below required {min_oos_rank_ic}; refusing deployment"
+            )
 
-        # 训练最终模型
-        self.model = lgb.LGBMClassifier(**params)
-        self.model.fit(
-            X, y,
-            eval_set=[(X, y)],
-            callbacks=[lgb.log_evaluation(period=0)],  # 静默训练
-        )
-
-        self.is_trained = True
-
-        # 保存特征重要性
-        importance = dict(zip(
-            self.feature_names,
-            self.model.feature_importances_.tolist()
-        ))
+        self.feature_names = feature_names
+        importance = dict(zip(feature_names, model.feature_importances_.tolist()))
         self.model = {
-            "metrics": {"trained": True, "samples": len(X), "positive_rate": float(y.mean()), "cv": cv_result},
-            "feature_importance": importance,
-            "model_obj": self.model,  # 内部引用
+            "metrics": {"trained": True, "samples": int(len(dev_idx)), "cv": cv,
+                        "oos": oos, "oos_start": str(oos_start.date()),
+                        "oos_end": str(dates[oos_idx].max().date()),
+                        "oos_samples": int(len(oos_idx))},
+            "feature_importance": importance, "model_obj": model,
         }
-
-        # 持久化
-        model_data = {
-            "is_trained": True,
-            "feature_names": self.feature_names,
-            "feature_importance": importance,
-            "params": params,
-            "train_date": datetime.now().strftime("%Y-%m-%d"),
-            "samples": int(X.shape[0]),
-            "cv": cv_result,
+        self.is_trained = True
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "is_trained": True, "model_type": "LGBMRanker",
+            "feature_names": feature_names, "feature_importance": importance,
+            "params": params, "train_date": datetime.now().strftime("%Y-%m-%d"),
+            **self.model["metrics"],
         }
-
-        # 保存元数据
-        meta_path = self.model_dir / "screening_meta.json"
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(model_data, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"LightGBM模型训练完成 | 样本数: {len(X)} | 特征数: {X.shape[1]} | CV AUC: {cv_result.get('mean_auc'):.4f}")
+        with open(self.model_dir / "screening_meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        with open(self.model_dir / "screening_cv_report.json", "w", encoding="utf-8") as f:
+            json.dump({"cv": cv, "oos": oos}, f, ensure_ascii=False, indent=2)
+        logger.info(f"LambdaRank trained; CV RankIC={cv.get('mean_rank_ic')}, OOS RankIC={oos.get('rank_ic')}")
 
     def _predict_scores(self, stock_codes: List[str], date: str) -> Dict[str, float]:
         """
