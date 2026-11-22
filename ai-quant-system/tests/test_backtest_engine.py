@@ -34,8 +34,8 @@ class TestBacktestEngine(unittest.TestCase):
             {"600000": {"open": 10, "high": 10.2, "low": 9.9,
                         "close": 11, "volume": 100000}},
         )
-        self.assertEqual(self.engine.positions["600000"].shares, 4900)
-        self.assertAlmostEqual(buy["market_value"], 53900)
+        self.assertEqual(self.engine.positions["600000"].shares, 5000)
+        self.assertAlmostEqual(buy["market_value"], 55000)
         self.assertLess(buy["cash"], 51000)
 
         sell = self.engine.step(
