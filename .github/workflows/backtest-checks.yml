@@ -6,6 +6,7 @@ on:
       - "ai-quant-system/backtest/**"
       - "ai-quant-system/pipeline.py"
       - "ai-quant-system/data/fetcher.py"
+      - "ai-quant-system/layers/screening.py"
       - "ai-quant-system/tests/**"
       - ".github/workflows/backtest-checks.yml"
   push:
@@ -23,11 +24,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install minimal test dependencies
-        run: python -m pip install --upgrade pip numpy pandas scikit-learn loguru pyyaml
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip numpy pandas scikit-learn loguru pyyaml matplotlib pytest
       - name: Compile changed Python modules
-        run: python -m compileall -q backtest pipeline.py data/fetcher.py tests
-      - name: Run backtest unit tests
+        run: python -m compileall -q backtest pipeline.py data/fetcher.py layers/screening.py tests
+      - name: Run unittest suite
         env:
           PYTHONPATH: .
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run pytest suite
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests
