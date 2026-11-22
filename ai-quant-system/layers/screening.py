@@ -41,7 +41,7 @@ class ScreeningLayer:
         self.selection_config = self.config.get("selection", {})
         self.factors_config = self.config.get("factors", {})
 
-        self.data_fetcher = DataFetcher()
+        self.data_fetcher = DataFetcher(self.config.get("data", {}))
         self.factor_processor = FactorProcessor()
 
         self.model = None
