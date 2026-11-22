@@ -153,7 +153,7 @@ class TestBacktestEngine(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "cannot calculate a reliable NAV"):
             self.engine.step(
-                "2024-01-03", {},
+                "2024-01-03", {"600000": 0.5},
                 {"600000": {"open": 10.5, "high": 10.8, "low": 10.4,
                             "volume": 100000}},
             )
