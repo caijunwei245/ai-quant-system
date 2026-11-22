@@ -300,7 +300,7 @@ class ScreeningLayer:
         """Train LambdaRank with purged walk-forward CV and a final untouched OOS period."""
         if not HAS_LIGHTGBM:
             raise RuntimeError("LightGBM is required for Alpha Ranker training")
-        from data.alpha_training import rank_metrics
+        from data.alpha_training import rank_metrics, split_development_oos
 
         X, y, raw_returns, stock_codes, feature_names, sample_dates, groups = self.build_training_dataset(
             valid_stocks, all_features, all_labels,
@@ -312,24 +312,13 @@ class ScreeningLayer:
         calendar = pd.DatetimeIndex(pd.to_datetime(
             self.data_fetcher.fetch_trading_calendar(start_date, end_date)
         )).normalize()
-        ranks = calendar.get_indexer(dates)
-        if (ranks < 0).any():
-            raise ValueError("training sample date missing from exchange trading calendar")
-
-        unique_dates = dates.unique().sort_values()
-        oos_fraction = float(self.lgb_config.get("oos_fraction", 0.2))
-        if not 0.1 <= oos_fraction <= 0.4:
-            raise ValueError("oos_fraction must be between 0.10 and 0.40")
-        split_at = int(np.floor(len(unique_dates) * (1.0 - oos_fraction)))
-        if split_at <= 0 or split_at >= len(unique_dates):
-            raise ValueError("not enough distinct dates for independent OOS split")
-        oos_start = unique_dates[split_at]
-        oos_rank = int(calendar.get_loc(oos_start))
         forward_days = int(self.lgb_config.get("forward_days", 5))
         embargo_days = int(self.lgb_config.get("embargo_days", 2))
-        dev_mask = (dates < oos_start) & ((ranks + forward_days) < (oos_rank - embargo_days))
-        oos_mask = dates >= oos_start
-        dev_idx, oos_idx = np.flatnonzero(dev_mask), np.flatnonzero(oos_mask)
+        dev_idx, oos_idx, oos_start = split_development_oos(
+            sample_dates, calendar,
+            oos_fraction=float(self.lgb_config.get("oos_fraction", 0.2)),
+            forward_days=forward_days, embargo_days=embargo_days,
+        )
         if len(dev_idx) < int(self.lgb_config.get("min_samples", 100)) or len(oos_idx) < 20:
             raise ValueError("development or independent OOS sample is too small")
 
