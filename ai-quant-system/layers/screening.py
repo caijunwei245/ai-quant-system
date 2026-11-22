@@ -354,11 +354,25 @@ class ScreeningLayer:
 
         self.feature_names = feature_names
         importance = dict(zip(feature_names, model.feature_importances_.tolist()))
+        oos_dates = dates[oos_idx]
+        oos_date_counts = pd.Series(oos_dates).value_counts().sort_index()
+        oos_stock_codes = np.asarray(stock_codes, dtype=object)[oos_idx]
+        oos_coverage = {
+            "date_start": str(oos_dates.min().date()),
+            "date_end": str(oos_dates.max().date()),
+            "trading_dates": int(oos_dates.nunique()),
+            "samples": int(len(oos_idx)),
+            "unique_stocks": int(pd.Series(oos_stock_codes).nunique()),
+            "daily_samples_min": int(oos_date_counts.min()),
+            "daily_samples_median": float(oos_date_counts.median()),
+            "daily_samples_max": int(oos_date_counts.max()),
+        }
         self.model = {
             "metrics": {"trained": True, "samples": int(len(dev_idx)), "cv": cv,
                         "oos": oos, "oos_start": str(oos_start.date()),
                         "oos_end": str(dates[oos_idx].max().date()),
-                        "oos_samples": int(len(oos_idx))},
+                        "oos_samples": int(len(oos_idx)),
+                        "oos_coverage": oos_coverage},
             "feature_importance": importance, "model_obj": model,
         }
         self.is_trained = True
