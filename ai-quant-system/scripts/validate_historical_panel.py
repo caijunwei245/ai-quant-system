@@ -55,6 +55,24 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
     issue_examples = df.loc[
         bad_traded_mask, ["code", "date", "open", "high", "low", "close", "volume"]
     ].head(20).astype({"date": str}).to_dict(orient="records")
+    bad_by_code = (
+        df.loc[bad_traded_mask].groupby("code").size()
+        .sort_values(ascending=False).head(20).astype(int).to_dict()
+    )
+    bad_by_year = (
+        df.loc[bad_traded_mask].assign(year=df.loc[bad_traded_mask, "date"].dt.year)
+        .groupby("year").size().astype(int).to_dict()
+    )
+    price_quantiles = {
+        col: {str(q): float(df.loc[positive_volume, col].quantile(q))
+              for q in [0.0, 0.01, 0.5, 0.99, 1.0]}
+        for col in ["open", "high", "low", "close"]
+    }
+    sample_600000 = (
+        df.loc[df["code"] == "600000", ["date", "open", "high", "low", "close", "volume"]]
+        .iloc[::max(1, int((df["code"] == "600000").sum() / 12))]
+        .head(12).astype({"date": str}).to_dict(orient="records")
+    )
     bad_ohlc = int((negative_volume | (positive_volume & (nonpositive_price | inconsistent_ohlc))).sum())
     all_zero_ohlc = int((df[["open", "high", "low", "close"]] == 0).all(axis=1).sum())
     date_min = df["date"].min()
@@ -79,7 +97,7 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
         "all_zero_ohlc_rows": all_zero_ohlc,
         "bad_traded_ohlc_rows": bad_traded_rows,
         "ohlc_issue_breakdown": ohlc_issues,
-        "bad_traded_row_examples": issue_examples,
+        "bad_traded_row_examples": issue_examples,\n        "bad_traded_rows_by_stock": bad_by_code,\n        "bad_traded_rows_by_year": bad_by_year,\n        "traded_price_quantiles": price_quantiles,\n        "sample_rows_600000": sample_600000,
         "negative_volume_rows": int(negative_volume.sum()),
         "invalid_ohlc_or_volume_rows": bad_ohlc,
         "rows_per_date": {
