@@ -145,8 +145,8 @@ def test_train_model_uses_ranker_groups_and_keeps_oos_out_of_fit(tmp_path):
             return self
 
         def predict(self, X):
-            # First feature is stock identity and perfectly orders future returns.
-            return X[:, 0]
+            # Feature names are alphabetically sorted: "signal" is column 1.
+            return X[:, 1]
 
     layer = ScreeningLayer({"lightgbm": {
         "min_samples": 100, "min_group_size": 5, "oos_fraction": 0.2,
