@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 REQUIRED = {"code", "date", "open", "high", "low", "close", "volume"}
@@ -22,7 +21,7 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
-    df["code"] = df["code"].astype(str).str.strip().str.lower().str.replace(r"\\D", "", regex=True).str[-6:]
+    df["code"] = df["code"].astype(str).str.strip().str.lower().str.replace(r"\D", "", regex=True).str[-6:]
     numeric = ["open", "high", "low", "close", "volume"]
     for col in numeric:
         df[col] = pd.to_numeric(df[col], errors="coerce")
