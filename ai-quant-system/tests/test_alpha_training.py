@@ -168,3 +168,20 @@ def test_train_model_uses_ranker_groups_and_keeps_oos_out_of_fit(tmp_path):
     assert layer.model["metrics"]["oos_start"] == dates[80].strftime("%Y-%m-%d")
     assert layer.model["metrics"]["oos_samples"] == 120
     assert (tmp_path / "screening_meta.json").exists()
+
+
+
+def test_real_lightgbm_ranker_accepts_date_group_sizes():
+    lightgbm = pytest.importorskip("lightgbm")
+    rng = np.random.RandomState(7)
+    groups = [8] * 12
+    X = rng.normal(size=(sum(groups), 4)).astype(np.float32)
+    y = np.tile(np.arange(8, dtype=np.int32), len(groups))
+    model = lightgbm.LGBMRanker(
+        objective="lambdarank", n_estimators=8, num_leaves=7,
+        min_child_samples=2, verbosity=-1, random_state=7, n_jobs=1,
+    )
+    model.fit(X, y, group=groups)
+    scores = model.predict(X)
+    assert scores.shape == (sum(groups),)
+    assert np.isfinite(scores).all()
