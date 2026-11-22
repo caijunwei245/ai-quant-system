@@ -8,7 +8,7 @@ from pathlib import Path
 import akshare as ak
 import pandas as pd
 
-CODES = []  # Eastmoney qfq/raw/hfq comparison for 600000 is archived in the prior run; avoid repeated API calls.
+CODES = []  # Eastmoney qfq/raw/hfq comparison for 600000 is archived in the prior run; avoid repeated API calls.\nSINA_CODES = ["600000", "601919", "600188", "600039", "600519", "000651", "000858", "600809"]
 START, END = "20100101", "20260807"
 SUSPECT_DATES = ["2010-01-04", "2012-07-12", "2012-07-23", "2012-10-10",
                  "2013-06-03", "2014-03-04", "2015-07-14", "2022-06-06", "2025-03-11"]
@@ -55,32 +55,58 @@ def main():
             except Exception as exc:
                 source[adjust or "none"] = {"status":"error","error":repr(exc)}
         result["codes"][code] = source
-    # Independent Sina endpoint probe for one representative stock. This
-    # avoids repeatedly querying Eastmoney, which rate-limits bulk diagnostics.
-    try:
-        sina_fetcher = getattr(ak, "stock_zh_a_hist_sina", None) or getattr(ak, "stock_zh_a_daily", None)
-        if sina_fetcher is None:
-            raise RuntimeError("AKShare has no stock_zh_a_hist_sina/stock_zh_a_daily endpoint")
-        sina = sina_fetcher(
-            symbol="sh600000", start_date=START, end_date=END, adjust="qfq"
-        )
-        sina = sina.reset_index() if isinstance(sina.index, pd.DatetimeIndex) else sina.copy()
-        if "date" not in sina.columns and "日期" in sina.columns:
-            sina = sina.rename(columns={"日期": "date"})
-        if "date" in sina.columns:
+    # Independent Sina qfq probe across representative stocks and date ranges.
+    result["sina_qfq"] = {}
+    for code in SINA_CODES:
+        try:
+            symbol = ("sh" if code.startswith(("5", "6", "9")) else "sz") + code
+            sina_fetcher = getattr(ak, "stock_zh_a_hist_sina", None) or getattr(ak, "stock_zh_a_daily", None)
+            if sina_fetcher is None:
+                raise RuntimeError("AKShare has no stock_zh_a_hist_sina/stock_zh_a_daily endpoint")
+            sina = sina_fetcher(symbol=symbol, start_date=START, end_date=END, adjust="qfq")
+            sina = sina.reset_index() if isinstance(sina.index, pd.DatetimeIndex) else sina.copy()
+            if "date" not in sina.columns and "日期" in sina.columns:
+                sina = sina.rename(columns={"日期": "date"})
+            if "date" not in sina.columns:
+                raise ValueError("Unexpected Sina schema: " + repr(list(sina.columns)))
             sina["date"] = pd.to_datetime(sina["date"]).dt.strftime("%Y-%m-%d")
-            selected = sina[sina["date"].isin(SUSPECT_DATES)]
-            result["sina_600000_qfq"] = {
-                "status": "ok", "rows": int(len(sina)),
-                "date_min": sina["date"].min(), "date_max": sina["date"].max(),
-                "samples": selected.to_dict(orient="records"),
+            local = panel[panel["code"] == code].copy()
+            local["date"] = pd.to_datetime(local["date"]).dt.strftime("%Y-%m-%d")
+            merged = sina.merge(
+                local[["date", "open", "high", "low", "close", "volume", "amount"]],
+                on="date", how="inner", suffixes=("_sina", "_panel")
+            )
+            price_cols = ["open", "high", "low", "close"]
+            bad_price = (
+                (merged[[f"{x}_sina" for x in price_cols]] <= 0).any(axis=1)
+                | (merged["high_sina"] < merged[["open_sina", "close_sina", "low_sina"]].max(axis=1))
+                | (merged["low_sina"] > merged[["open_sina", "close_sina", "high_sina"]].min(axis=1))
+            )
+            volume_ratio = merged["volume_sina"] / merged["volume_panel"].replace(0, pd.NA)
+            amount_rel_error = (
+                (merged["amount_sina"] - merged["amount_panel"]).abs()
+                / merged["amount_panel"].abs().clip(lower=1)
+            )
+            sample = merged[merged["date"].isin(SUSPECT_DATES)].head(20)
+            result["sina_qfq"][code] = {
+                "status": "ok",
+                "rows": int(len(sina)),
+                "date_min": sina["date"].min(),
+                "date_max": sina["date"].max(),
+                "matched_dates": int(len(merged)),
+                "panel_dates": int(local["date"].nunique()),
+                "missing_sina_dates": int(local["date"].nunique() - merged["date"].nunique()),
+                "bad_price_rows": int(bad_price.sum()),
+                "volume_ratio_quantiles": {
+                    str(q): float(volume_ratio.quantile(q))
+                    for q in [0.0, 0.5, 1.0] if pd.notna(volume_ratio.quantile(q))
+                },
+                "amount_relative_error_max": float(amount_rel_error.max()) if len(amount_rel_error) else None,
+                "samples": sample.to_dict(orient="records"),
             }
-        else:
-            result["sina_600000_qfq"] = {
-                "status": "unexpected_schema", "columns": list(sina.columns)
-            }
-    except Exception as exc:
-        result["sina_600000_qfq"] = {"status": "error", "error": repr(exc)}
+            time.sleep(0.5)
+        except Exception as exc:
+            result["sina_qfq"][code] = {"status": "error", "error": repr(exc)}
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
