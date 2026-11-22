@@ -10,7 +10,6 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import make_scorer
 from loguru import logger
 
@@ -250,42 +249,6 @@ class ScreeningLayer:
         if len(X) < min_samples:
             raise ValueError(f"training samples insufficient: {len(X)} < {min_samples}")
         return X, relevance, raw_returns, stock_codes, feature_names, sample_dates, groups
-
-    def _time_series_cv(self, X: np.ndarray, y: np.ndarray, n_splits: int = 5) -> Dict[str, float]:
-        """
-        基于TimeSeriesSplit的简单时序交叉验证
-        返回: 字典 {"mean_auc":..., "std_auc":...}
-        (保留为回退方法, 主要使用_purged_kfold_cv)
-        """
-        from sklearn.metrics import roc_auc_score
-
-        if X.size == 0 or len(y) < 20:
-            return {"mean_auc": 0.0, "std_auc": 0.0, "n_splits": 0}
-
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        aucs = []
-        for train_idx, val_idx in tscv.split(X):
-            try:
-                X_tr, X_val = X[train_idx], X[val_idx]
-                y_tr, y_val = y[train_idx], y[val_idx]
-                model = lgb.LGBMClassifier(**{
-                    "objective": "binary",
-                    "n_estimators": max(50, int(self.lgb_config.get("n_estimators", 500) // 5)),
-                    "learning_rate": self.lgb_config.get("learning_rate", 0.05),
-                    "random_state": 42,
-                })
-                model.fit(X_tr, y_tr)
-                probs = model.predict_proba(X_val)[:, 1]
-                auc = float(roc_auc_score(y_val, probs)) if len(np.unique(y_val)) > 1 else 0.5
-                aucs.append(auc)
-            except Exception as e:
-                logger.debug(f"CV fold failed: {e}")
-                continue
-
-        if not aucs:
-            return {"mean_auc": 0.0, "std_auc": 0.0, "n_splits": 0}
-
-        return {"mean_auc": float(np.mean(aucs)), "std_auc": float(np.std(aucs)), "n_splits": len(aucs)}
 
     def _purged_kfold_cv(
         self, X, y, sample_dates, raw_returns, trading_calendar,
