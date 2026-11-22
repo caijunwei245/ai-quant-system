@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.alpha_training import build_rank_dataset, purged_walk_forward_splits, rank_metrics
+from data.alpha_training import (build_rank_dataset, purged_walk_forward_splits, rank_metrics, split_development_oos)
 
 
 def _panel_inputs(n_dates=12, n_stocks=6):
@@ -86,3 +86,28 @@ def test_rank_metrics_calculates_daily_rankic_and_top_bottom_spread():
     assert metrics["rank_ic"] == pytest.approx(1.0)
     assert metrics["top_bottom_return"] == pytest.approx(0.08)
     assert metrics["n_dates"] == 2
+
+
+
+def test_independent_oos_is_latest_date_block_and_purges_overlap():
+    calendar = pd.bdate_range("2024-01-02", periods=100)
+    dates = list(calendar)
+    dev, oos, oos_start = split_development_oos(
+        dates, calendar, oos_fraction=0.2, forward_days=5, embargo_days=2
+    )
+    assert oos_start == calendar[80]
+    assert len(oos) == 20
+    assert max(dev) < min(oos)
+    # Last development observation must finish its forward label before OOS embargo.
+    dev_ranks = calendar.get_indexer(pd.DatetimeIndex(dates)[dev])
+    assert np.all(dev_ranks + 5 < (80 - 2))
+
+
+def test_independent_oos_rejects_unknown_dates_and_invalid_fraction():
+    calendar = pd.bdate_range("2024-01-02", periods=50)
+    with pytest.raises(ValueError, match="missing from trading calendar"):
+        split_development_oos(
+            list(calendar[:20]) + [pd.Timestamp("2024-04-01")], calendar
+        )
+    with pytest.raises(ValueError, match="oos_fraction"):
+        split_development_oos(list(calendar), calendar, oos_fraction=0.05)
