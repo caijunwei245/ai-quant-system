@@ -116,6 +116,8 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
             # A missing Sina date is allowed only when the original panel has zero volume
             # (suspension/no-trade). Carry forward the last available adjusted close,
             # never a future value, and mark the imputed row explicitly.
+            local["price_source"] = "akshare_sina_qfq"
+            local["price_adjustment"] = "qfq"
             missing_prices = local["close"].isna()
             zero_volume_missing = missing_prices & (local["volume"] == 0)
             if (missing_prices & ~zero_volume_missing).any():
