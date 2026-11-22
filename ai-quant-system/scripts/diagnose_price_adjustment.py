@@ -31,7 +31,10 @@ def main():
         source = {}
         for adjust in ["", "qfq", "hfq"]:
             try:
-                raw = ak.stock_zh_a_hist(symbol=code, period="daily",
+                fetcher = getattr(ak, "stock_zh_a_hist_em", None) or getattr(ak, "stock_zh_a_hist", None)
+                if fetcher is None:
+                    raise RuntimeError("AKShare has no stock_zh_a_hist_em/stock_zh_a_hist endpoint")
+                raw = fetcher(symbol=code, period="daily",
                     start_date=START, end_date=END, adjust=adjust)
                 if raw is None or raw.empty:
                     source[adjust or "none"] = {"status": "empty"}
