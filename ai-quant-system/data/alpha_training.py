@@ -150,6 +150,8 @@ def split_development_oos(sample_dates, trading_calendar, oos_fraction=0.2,
     ranks = calendar.get_indexer(dates)
     if (ranks < 0).any():
         raise ValueError("sample dates missing from trading calendar")
+    if int(forward_days) < 0 or int(embargo_days) < 0:
+        raise ValueError("forward_days and embargo_days must be non-negative")
     fraction = float(oos_fraction)
     if not 0.1 <= fraction <= 0.4:
         raise ValueError("oos_fraction must be between 0.10 and 0.40")
