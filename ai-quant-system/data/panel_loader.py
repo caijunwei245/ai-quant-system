@@ -59,16 +59,9 @@ def build_stock_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
         .copy()
     )
     # Zero-volume rows represent non-trading/suspension sessions in this panel.
-    # Exclude them, as well as non-positive prices, before factor/label creation.
-    sub = sub[
-        (sub["volume"] > 0)
-        & (sub["open"] > 0)
-        & (sub["high"] > 0)
-        & (sub["low"] > 0)
-        & (sub["close"] > 0)
-        & (sub["high"] >= sub[["open", "close"]].max(axis=1))
-        & (sub["low"] <= sub[["open", "close"]].min(axis=1))
-    ]
+    # Do not silently repair/drop price or OHLC violations here: the upstream
+    # historical-panel audit must reject those records before any training run.
+    sub = sub[sub["volume"] > 0]
     return sub.set_index("date").sort_index()
 
 
