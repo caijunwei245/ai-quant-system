@@ -58,7 +58,10 @@ def main():
     # Independent Sina endpoint probe for one representative stock. This
     # avoids repeatedly querying Eastmoney, which rate-limits bulk diagnostics.
     try:
-        sina = ak.stock_zh_a_daily(
+        sina_fetcher = getattr(ak, "stock_zh_a_hist_sina", None) or getattr(ak, "stock_zh_a_daily", None)
+        if sina_fetcher is None:
+            raise RuntimeError("AKShare has no stock_zh_a_hist_sina/stock_zh_a_daily endpoint")
+        sina = sina_fetcher(
             symbol="sh600000", start_date=START, end_date=END, adjust="qfq"
         )
         sina = sina.reset_index() if isinstance(sina.index, pd.DatetimeIndex) else sina.copy()
