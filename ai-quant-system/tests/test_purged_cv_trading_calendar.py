@@ -1,40 +1,69 @@
 import numpy as np
 import pandas as pd
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from layers import screening
 from layers.screening import ScreeningLayer
 
 
-def test_purged_kfold_trading_calendar():
-    # 构建交易日历为工作日 (business days)
-    trading_index = pd.bdate_range(start="2026-07-01", periods=30)
+class _DeterministicClassifier:
+    """Small deterministic stand-in: this test targets date purging, not model quality."""
 
-    # 样本日期与交易日一一对应 (每个交易日1个样本)
-    sample_dates = list(trading_index)
+    def __init__(self, **kwargs):
+        self.classes_ = np.array([0, 1])
 
-    # 合成特征 X 和标签 y（单个样本对应一个交易日）
+    def fit(self, X, y):
+        return self
+
+    def predict_proba(self, X):
+        probabilities = np.full(len(X), 0.5)
+        return np.column_stack((1.0 - probabilities, probabilities))
+
+
+def test_purged_kfold_uses_exchange_trading_day_ranks(tmp_path):
+    # 120 actual exchange sessions; the fold boundary is session 40.
+    trading_calendar = pd.bdate_range(start="2026-01-05", periods=120)
+    sample_dates = list(trading_calendar)
     rng = np.random.RandomState(42)
     X = rng.randn(len(sample_dates), 5).astype("float32")
-    # 让标签在不同时段有正负样本
-    y = np.array([1 if (i % 7 == 0) else 0 for i in range(len(sample_dates))], dtype=int)
+    y = np.array([i % 2 for i in range(len(sample_dates))], dtype=int)
 
     layer = ScreeningLayer(config={})
+    layer.model_dir = tmp_path
 
-    # 运行 purged cv，显式传入 trading_calendar
-    result = layer._purged_kfold_cv(X, y, sample_dates, n_splits=3, embargo_days=1, forward_days=2, trading_calendar=trading_index)
+    # Keep the test independent of an optional LightGBM installation.
+    fake_lightgbm = SimpleNamespace(LGBMClassifier=_DeterministicClassifier)
+    with patch.object(screening, "lgb", fake_lightgbm, create=True):
+        result = layer._purged_kfold_cv(
+            X,
+            y,
+            sample_dates,
+            n_splits=3,
+            embargo_days=1,
+            forward_days=2,
+            trading_calendar=trading_calendar,
+        )
 
-    # 确认有 folds 返回
     assert isinstance(result, dict)
-    assert result.get("n_folds", 0) >= 1
+    assert result["n_folds"] == 2
 
-    # 找到 val_start 为 trading_index[10] 的那一折，检查训练样本数是否符合预期
-    expected_val_start = str(pd.to_datetime(trading_index[10]).date())
-    target_fold = None
-    for f in result.get("folds", []):
-        if f.get("val_start") == expected_val_start:
-            target_fold = f
-            break
+    # The second fold starts at trading session 40. Training samples initially
+    # cover ranks 0..39; purge condition rank + 2 >= 40 - 1 removes 37..39.
+    expected_val_start = trading_calendar[40].strftime("%Y-%m-%d")
+    target_fold = next(
+        (fold for fold in result["folds"] if fold["val_start"] == expected_val_start),
+        None,
+    )
+    assert target_fold is not None
+    assert target_fold["n_train"] == 37
+    assert target_fold["n_val"] == 40
 
-    assert target_fold is not None, f"未找到 val_start={expected_val_start} 的折"
-
-    # 计算期望训练数: ranks 0..9 为训练样本, purge 条件为 sample_rank + fwd >= val_start_rank - embargo
-    # val_start_rank = 10, embargo=1, fwd=2 => purge sample_rank >= 7 => remaining sample_rank 0..6 => 7 样本
-    assert target_fold.get("n_train") == 7, f"期望 n_train=7, 实际 {target_fold.get('n_train')}"
+    # Third fold starts at session 80: ranks 77..79 are purged, leaving 77.
+    third_fold_start = trading_calendar[80].strftime("%Y-%m-%d")
+    third_fold = next(
+        (fold for fold in result["folds"] if fold["val_start"] == third_fold_start),
+        None,
+    )
+    assert third_fold is not None
+    assert third_fold["n_train"] == 77
