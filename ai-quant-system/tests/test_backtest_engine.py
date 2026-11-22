@@ -145,6 +145,18 @@ class TestBacktestEngine(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine.normalize_calendar(calendar, "2024-01-09", "2024-01-08")
 
+    def test_calendar_date_column_with_timezone_is_normalized(self):
+        calendar = pd.DataFrame({
+            "date": pd.to_datetime([
+                "2024-01-08 09:30:00+08:00",
+                "2024-01-09 09:30:00+08:00",
+            ])
+        })
+        self.assertEqual(
+            self.engine.normalize_calendar(calendar, "2024-01-08", "2024-01-09"),
+            ["2024-01-08", "2024-01-09"],
+        )
+
     def test_missing_close_for_held_position_fails_closed(self):
         self.engine.step(
             "2024-01-02", {"600000": 0.5},
