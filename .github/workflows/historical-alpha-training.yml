@@ -10,6 +10,7 @@ on:
       - "ai-quant-system/scripts/validate_historical_panel.py"
       - "ai-quant-system/layers/screening.py"
       - "ai-quant-system/data/alpha_training.py"
+      - "ai-quant-system/data/panel_loader.py"
       - ".github/workflows/historical-alpha-training.yml"
 
 permissions:
