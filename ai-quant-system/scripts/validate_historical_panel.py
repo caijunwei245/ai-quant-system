@@ -42,7 +42,19 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
     negative_volume = df["volume"] < 0
     # A zero-volume row is a non-trading/suspension observation and is excluded
     # from factor construction. Invalid prices/OHLC on a traded row remain fatal.
-    bad_traded_rows = int((positive_volume & (nonpositive_price | inconsistent_ohlc)).sum())
+    bad_traded_mask = positive_volume & (nonpositive_price | inconsistent_ohlc)
+    bad_traded_rows = int(bad_traded_mask.sum())
+    ohlc_issues = {
+        "nonpositive_price_rows_with_volume": int((positive_volume & nonpositive_price).sum()),
+        "high_below_low_rows_with_volume": int((positive_volume & (df["high"] < df["low"])).sum()),
+        "high_below_open_rows_with_volume": int((positive_volume & (df["high"] < df["open"])).sum()),
+        "high_below_close_rows_with_volume": int((positive_volume & (df["high"] < df["close"])).sum()),
+        "low_above_open_rows_with_volume": int((positive_volume & (df["low"] > df["open"])).sum()),
+        "low_above_close_rows_with_volume": int((positive_volume & (df["low"] > df["close"])).sum()),
+    }
+    issue_examples = df.loc[
+        bad_traded_mask, ["code", "date", "open", "high", "low", "close", "volume"]
+    ].head(20).astype({"date": str}).to_dict(orient="records")
     bad_ohlc = int((negative_volume | (positive_volume & (nonpositive_price | inconsistent_ohlc))).sum())
     all_zero_ohlc = int((df[["open", "high", "low", "close"]] == 0).all(axis=1).sum())
     date_min = df["date"].min()
@@ -66,6 +78,8 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
         "zero_volume_rows": int(zero_volume.sum()),
         "all_zero_ohlc_rows": all_zero_ohlc,
         "bad_traded_ohlc_rows": bad_traded_rows,
+        "ohlc_issue_breakdown": ohlc_issues,
+        "bad_traded_row_examples": issue_examples,
         "negative_volume_rows": int(negative_volume.sum()),
         "invalid_ohlc_or_volume_rows": bad_ohlc,
         "rows_per_date": {
