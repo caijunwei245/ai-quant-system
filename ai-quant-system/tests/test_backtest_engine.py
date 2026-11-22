@@ -73,6 +73,51 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertEqual(len(self.engine.trades), 0)
         self.assertEqual(result["stale_marks"], [])
 
+    def test_daily_ledger_reconciliation_with_fixed_three_day_sample(self):
+        """Cash + marked holdings must reconcile each day; costs hit cash exactly once."""
+        day1 = self.engine.step(
+            "2024-01-02", {"600000": 0.5},
+            {"600000": {"open": 10, "high": 10.2, "low": 9.9,
+                        "close": 10, "volume": 100000}},
+        )
+        day2 = self.engine.step(
+            "2024-01-03", {"600000": 0.25},
+            {"600000": {"open": 11, "high": 12, "low": 10.9,
+                        "close": 12, "volume": 100000, "pre_close": 10}},
+        )
+        day3 = self.engine.step(
+            "2024-01-04", {},
+            {"600000": {"open": 12, "high": 12.1, "low": 11.9,
+                        "close": 12, "volume": 100000, "pre_close": 12}},
+        )
+
+        for snapshot in (day1, day2, day3):
+            holdings_value = sum(
+                item["shares"] * item["last_price"]
+                for item in snapshot["positions"].values()
+            )
+            self.assertAlmostEqual(snapshot["market_value"], holdings_value, places=8)
+            self.assertAlmostEqual(
+                snapshot["nav"], snapshot["cash"] + holdings_value, places=8
+            )
+            self.assertGreaterEqual(snapshot["cash"], -1e-8)
+
+        self.assertEqual(day1["positions"]["600000"]["shares"], 5000)
+        self.assertEqual(day2["positions"]["600000"]["shares"], 2300)
+        self.assertEqual(day3["positions"], {})
+        self.assertAlmostEqual(day3["nav"], day3["cash"], places=8)
+
+        total_commission = sum(trade["commission"] for trade in self.engine.trades)
+        total_stamp_tax = sum(trade["stamp_tax"] for trade in self.engine.trades)
+        total_slippage = sum(trade["slippage_cost"] for trade in self.engine.trades)
+        self.assertGreater(total_commission, 0)
+        self.assertGreater(total_stamp_tax, 0)
+        self.assertGreater(total_slippage, 0)
+        self.assertTrue(all(trade["fill_price"] != trade["reference_price"]
+                            for trade in self.engine.trades))
+        self.assertEqual([trade["side"] for trade in self.engine.trades],
+                         ["buy", "sell", "sell"])
+
     def test_no_leverage(self):
         with self.assertRaises(ValueError):
             self.engine.step("2024-01-02", {"600000": 1.1}, {})
