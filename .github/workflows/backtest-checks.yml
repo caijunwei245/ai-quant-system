@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install minimal test dependencies
-        run: python -m pip install --upgrade pip numpy pandas scikit-learn loguru
+        run: python -m pip install --upgrade pip numpy pandas scikit-learn loguru pyyaml
       - name: Compile changed Python modules
         run: python -m compileall -q backtest pipeline.py data/fetcher.py tests
       - name: Run backtest unit tests
