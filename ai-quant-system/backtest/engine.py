@@ -64,9 +64,16 @@ class BacktestEngine:
     @staticmethod
     def normalize_calendar(calendar: pd.DataFrame, start: str, end: str) -> list[str]:
         """Use an exchange/benchmark date index; never synthesize weekdays."""
-        if calendar is None or calendar.empty:
+        if calendar is None:
             raise ValueError("benchmark trading calendar is empty; refusing to synthesize weekdays")
-        dates = pd.to_datetime(calendar.index, errors="coerce")
+        # DataFrame.empty is also True when a valid date index has zero columns.
+        # Treat the index as the calendar unless it is an empty/default RangeIndex.
+        if len(calendar.index) == 0 and not ("date" in calendar.columns and len(calendar["date"]) > 0):
+            raise ValueError("benchmark trading calendar is empty; refusing to synthesize weekdays")
+        if "date" in calendar.columns and isinstance(calendar.index, pd.RangeIndex):
+            dates = pd.to_datetime(calendar["date"], errors="coerce")
+        else:
+            dates = pd.to_datetime(calendar.index, errors="coerce")
         if dates.isna().all() and "date" in calendar.columns:
             dates = pd.to_datetime(calendar["date"], errors="coerce")
         start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
