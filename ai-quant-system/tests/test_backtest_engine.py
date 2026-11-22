@@ -128,6 +128,42 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertEqual([trade["side"] for trade in self.engine.trades],
                          ["buy", "sell", "sell"])
 
+
+    def test_calendar_normalizes_timezone_and_deduplicates_sessions(self):
+        calendar = pd.DataFrame(index=pd.DatetimeIndex([
+            "2024-01-08 09:30:00+08:00",
+            "2024-01-08 15:00:00+08:00",
+            "2024-01-09 15:00:00+08:00",
+        ]))
+        self.assertEqual(
+            self.engine.normalize_calendar(calendar, "2024-01-08", "2024-01-09"),
+            ["2024-01-08", "2024-01-09"],
+        )
+
+    def test_calendar_rejects_reversed_bounds(self):
+        calendar = pd.DataFrame(index=pd.to_datetime(["2024-01-08"]))
+        with self.assertRaises(ValueError):
+            self.engine.normalize_calendar(calendar, "2024-01-09", "2024-01-08")
+
+    def test_missing_close_for_held_position_fails_closed(self):
+        self.engine.step(
+            "2024-01-02", {"600000": 0.5},
+            {"600000": {"open": 10, "high": 10.2, "low": 9.9,
+                        "close": 10, "volume": 100000}},
+        )
+        with self.assertRaisesRegex(ValueError, "cannot calculate a reliable NAV"):
+            self.engine.step(
+                "2024-01-03", {},
+                {"600000": {"open": 10.5, "high": 10.8, "low": 10.4,
+                            "volume": 100000}},
+            )
+
+    def test_invalid_fee_and_limit_configuration_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BacktestEngine({"min_commission": -1})
+        with self.assertRaises(ValueError):
+            BacktestEngine({"default_limit_pct": 1.0})
+
     def test_no_leverage(self):
         with self.assertRaises(ValueError):
             self.engine.step("2024-01-02", {"600000": 1.1}, {})
