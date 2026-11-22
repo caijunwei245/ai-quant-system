@@ -56,10 +56,20 @@ def build_stock_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
     sub = (
         df[df["code"] == code][cols]
         .dropna(subset=["open", "high", "low", "close", "volume"])
-        .set_index("date")
-        .sort_index()
+        .copy()
     )
-    return sub
+    # Zero-volume rows represent non-trading/suspension sessions in this panel.
+    # Exclude them, as well as non-positive prices, before factor/label creation.
+    sub = sub[
+        (sub["volume"] > 0)
+        & (sub["open"] > 0)
+        & (sub["high"] > 0)
+        & (sub["low"] > 0)
+        & (sub["close"] > 0)
+        & (sub["high"] >= sub[["open", "close"]].max(axis=1))
+        & (sub["low"] <= sub[["open", "close"]].min(axis=1))
+    ]
+    return sub.set_index("date").sort_index()
 
 
 def iter_stock_frames(df: pd.DataFrame, top_n: int | None = None):
