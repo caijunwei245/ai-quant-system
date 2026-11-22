@@ -83,11 +83,14 @@ def main():
                 | (merged["high_sina"] < merged[["open_sina", "close_sina", "low_sina"]].max(axis=1))
                 | (merged["low_sina"] > merged[["open_sina", "close_sina", "high_sina"]].min(axis=1))
             )
-            volume_ratio = merged["volume_sina"] / merged["volume_panel"].replace(0, pd.NA)
+            active = merged["volume_panel"] > 0
+            volume_ratio = merged.loc[active, "volume_sina"] / merged.loc[active, "volume_panel"]
+            amount_active = active & (merged["amount_panel"] > 0)
             amount_rel_error = (
-                (merged["amount_sina"] - merged["amount_panel"]).abs()
-                / merged["amount_panel"].abs().clip(lower=1)
+                (merged.loc[amount_active, "amount_sina"] - merged.loc[amount_active, "amount_panel"]).abs()
+                / merged.loc[amount_active, "amount_panel"].abs().clip(lower=1)
             )
+            missing_local = local[~local["date"].isin(sina["date"])]
             sample = merged[merged["date"].isin(SUSPECT_DATES)].head(20)
             result["sina_qfq"][code] = {
                 "status": "ok",
@@ -97,12 +100,17 @@ def main():
                 "matched_dates": int(len(merged)),
                 "panel_dates": int(local["date"].nunique()),
                 "missing_sina_dates": int(local["date"].nunique() - merged["date"].nunique()),
+                "missing_dates_with_positive_panel_volume": int((missing_local["volume"] > 0).sum()),
+                "missing_dates_with_zero_panel_volume": int((missing_local["volume"] == 0).sum()),
                 "bad_price_rows": int(bad_price.sum()),
-                "volume_ratio_quantiles": {
+                "active_volume_ratio_quantiles": {
                     str(q): float(volume_ratio.quantile(q))
                     for q in [0.0, 0.5, 1.0] if pd.notna(volume_ratio.quantile(q))
                 },
-                "amount_relative_error_max": float(amount_rel_error.max()) if len(amount_rel_error) else None,
+                "active_amount_relative_error_quantiles": {
+                    str(q): float(amount_rel_error.quantile(q))
+                    for q in [0.5, 0.99, 1.0] if pd.notna(amount_rel_error.quantile(q))
+                },
                 "samples": sample.to_dict(orient="records"),
             }
             time.sleep(0.5)
