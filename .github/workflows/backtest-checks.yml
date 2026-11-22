@@ -1,0 +1,33 @@
+name: Backtest accounting checks
+
+on:
+  pull_request:
+    paths:
+      - "ai-quant-system/backtest/**"
+      - "ai-quant-system/pipeline.py"
+      - "ai-quant-system/data/fetcher.py"
+      - "ai-quant-system/tests/**"
+      - ".github/workflows/backtest-checks.yml"
+  push:
+    branches:
+      - "fix/backtest-accounting-engine"
+
+jobs:
+  syntax-and-ledger-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-quant-system
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal test dependencies
+        run: python -m pip install --upgrade pip numpy pandas
+      - name: Compile changed Python modules
+        run: python -m compileall -q backtest pipeline.py data/fetcher.py tests
+      - name: Run backtest unit tests
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s tests -p "test_*.py" -v
