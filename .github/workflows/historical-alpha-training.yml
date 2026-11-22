@@ -71,7 +71,7 @@ jobs:
       - name: Audit complete historical panel (fail closed)
         run: |
           python scripts/validate_historical_panel.py \
-            --panel data/csi300_daily_2010_2026.csv.gz \
+            --panel data/csi300_daily_2010_2026_repaired.csv.gz \
             --output reports/alpha-training/data_audit.json \
             --min-rows 900000 --min-stocks 200 --min-dates 1000 \
             --min-start 2010-12-31 --min-end 2026-01-01
@@ -89,7 +89,7 @@ jobs:
       - name: Train LambdaRank on the verified full panel only
         run: |
           python scripts/train_screening.py \
-            --panel data/csi300_daily_2010_2026.csv.gz \
+            --panel data/csi300_daily_2010_2026_repaired.csv.gz \
             --data-audit reports/alpha-training/data_audit.json \
             --report-dir reports/alpha-training \
             --model-dir models \
