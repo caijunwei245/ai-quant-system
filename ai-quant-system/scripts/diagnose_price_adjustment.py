@@ -8,7 +8,8 @@ from pathlib import Path
 import akshare as ak
 import pandas as pd
 
-CODES = []  # Eastmoney qfq/raw/hfq comparison for 600000 is archived in the prior run; avoid repeated API calls.\nSINA_CODES = ["600000", "601919", "600188", "600039", "600519", "000651", "000858", "600809"]
+CODES = []  # Eastmoney qfq/raw/hfq comparison for 600000 is archived in the prior run; avoid repeated API calls.
+SINA_CODES = ["600000", "601919", "600188", "600039", "600519", "000651", "000858", "600809"]
 START, END = "20100101", "20260807"
 SUSPECT_DATES = ["2010-01-04", "2012-07-12", "2012-07-23", "2012-10-10",
                  "2013-06-03", "2014-03-04", "2015-07-14", "2022-06-06", "2025-03-11"]
