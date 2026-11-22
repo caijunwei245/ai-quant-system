@@ -49,9 +49,12 @@ class BacktestEngine:
             raise ValueError("lot_size must be positive")
         for name, value in (("commission", self.commission_rate),
                             ("stamp_tax", self.stamp_tax_rate),
-                            ("slippage", self.slippage_rate)):
+                            ("slippage", self.slippage_rate),
+                            ("min_commission", self.min_commission)):
             if not np.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be non-negative and finite")
+        if not np.isfinite(self.default_limit_pct) or not 0 < self.default_limit_pct < 1:
+            raise ValueError("default_limit_pct must be in (0, 1)")
 
     @staticmethod
     def _number(row: Mapping, key: str, default: float = np.nan) -> float:
@@ -77,7 +80,15 @@ class BacktestEngine:
         if dates.isna().all() and "date" in calendar.columns:
             dates = pd.to_datetime(calendar["date"], errors="coerce")
         start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
-        selected = sorted({d.strftime("%Y-%m-%d") for d in dates if not pd.isna(d) and start_ts <= d.normalize() <= end_ts})
+        if start_ts.tz is not None:
+            start_ts = start_ts.tz_localize(None)
+        if end_ts.tz is not None:
+            end_ts = end_ts.tz_localize(None)
+        if getattr(dates, "tz", None) is not None:
+            dates = dates.tz_localize(None)
+        if pd.isna(start_ts) or pd.isna(end_ts) or start_ts > end_ts:
+            raise ValueError("calendar start/end must be valid and start must not exceed end")
+        selected = sorted({d.strftime("%Y-%m-%d") for d in dates if not pd.isna(d) and start_ts.normalize() <= d.normalize() <= end_ts.normalize()})
         if not selected:
             raise ValueError(f"benchmark has no trading sessions in [{start}, {end}]")
         return selected
@@ -278,6 +289,11 @@ class BacktestEngine:
                 position.last_price = close
             else:
                 stale.append(code)
+        if stale:
+            raise ValueError(
+                "cannot calculate a reliable NAV: missing/invalid close for held symbols "
+                + ", ".join(sorted(stale))
+            )
         value = self.nav()
         snapshot = {
             "date": date, "nav": value, "cash": float(self.cash),
