@@ -103,16 +103,26 @@ class TestBacktestEngine(unittest.TestCase):
             self.assertGreaterEqual(snapshot["cash"], -1e-8)
 
         self.assertEqual(day1["positions"]["600000"]["shares"], 5000)
+        self.assertAlmostEqual(day1["cash"], 49934.985, places=6)
+        self.assertAlmostEqual(day1["market_value"], 50000.0, places=6)
+        self.assertAlmostEqual(day1["nav"], 99934.985, places=6)
+
         self.assertEqual(day2["positions"]["600000"]["shares"], 2300)
+        self.assertAlmostEqual(day2["cash"], 79566.71361, places=6)
+        self.assertAlmostEqual(day2["market_value"], 27600.0, places=6)
+        self.assertAlmostEqual(day2["nav"], 107166.71361, places=6)
+
         self.assertEqual(day3["positions"], {})
+        self.assertAlmostEqual(day3["cash"], 107103.26949, places=6)
         self.assertAlmostEqual(day3["nav"], day3["cash"], places=8)
 
         total_commission = sum(trade["commission"] for trade in self.engine.trades)
+        self.assertAlmostEqual(total_commission, 32.18781, places=6)
         total_stamp_tax = sum(trade["stamp_tax"] for trade in self.engine.trades)
         total_slippage = sum(trade["slippage_cost"] for trade in self.engine.trades)
         self.assertGreater(total_commission, 0)
-        self.assertGreater(total_stamp_tax, 0)
-        self.assertGreater(total_slippage, 0)
+        self.assertAlmostEqual(total_stamp_tax, 57.2427, places=6)
+        self.assertAlmostEqual(total_slippage, 107.3, places=6)
         self.assertTrue(all(trade["fill_price"] != trade["reference_price"]
                             for trade in self.engine.trades))
         self.assertEqual([trade["side"] for trade in self.engine.trades],
