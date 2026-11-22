@@ -5,7 +5,7 @@ Train the Screening (LightGBM) model of the AI quant system.
 
 Two modes:
 
-  * Panel mode (default, fully offline): load a prepared CSI300 daily panel
+  * Panel mode (default): load a prepared CSI300 daily panel
     file (data/csi300_daily_2010_2026.csv[.gz]) via ``data.panel_loader``,
     compute factors + N-day forward-return labels per stock, build a
     cross-sectional training set, run Purged-K-Fold CV with embargo and train
@@ -93,7 +93,7 @@ def train_from_panel(panel_path, config, args):
     lgb_config["lookback_days"] = 10 ** 9 if lookback <= 0 else lookback
     forward_days = int(lgb_config.get("forward_days", 5))
 
-    layer = ScreeningLayer({"lightgbm": lgb_config})
+    layer = ScreeningLayer({"lightgbm": lgb_config, "data": config.get("data", {})})
 
     valid_stocks, all_features, all_labels = build_dataset_from_panel(
         panel_path, layer.factor_processor, forward_days
@@ -120,7 +120,12 @@ def train_from_panel(panel_path, config, args):
 
 
 def train_live(config, args):
-    layer = ScreeningLayer(config.get("screening", {}))
+    screening_config = dict(config.get("screening", {}))
+    screening_config["data"] = config.get("data", {})
+    lgb_config = dict(screening_config.get("lightgbm", {}))
+    lgb_config["min_oos_rank_ic"] = float(args.min_oos_rank_ic)
+    screening_config["lightgbm"] = lgb_config
+    layer = ScreeningLayer(screening_config)
     if layer.load_model() and not args.force:
         print("Existing screening model loaded. Use --force to retrain.")
         return
