@@ -540,7 +540,7 @@ class ScreeningLayer:
 
         model_obj = self.model.get("model_obj", self.model) if isinstance(self.model, dict) else self.model
 
-        # LightGBM 4.x: LGBMClassifier exposes the booster via `.booster_`
+        # LightGBM 4.x: LGBMRanker exposes the booster via `.booster_`
         # and only the Booster has `save_model`. Fall back gracefully.
         booster = getattr(model_obj, "booster_", None) or (
             model_obj if hasattr(model_obj, "save_model") else None
