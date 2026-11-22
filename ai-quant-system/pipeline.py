@@ -48,8 +48,10 @@ class QuantPipeline:
         )
         self.log = get_logger("pipeline")
 
-        # 初始化四层
-        self.screening = ScreeningLayer(self.config.get("screening", {}))
+        # 初始化四层；将统一数据源配置显式传入初筛数据获取器
+        screening_config = dict(self.config.get("screening", {}))
+        screening_config["data"] = self.config.get("data", {})
+        self.screening = ScreeningLayer(screening_config)
         self.research = ResearchLayer(self.config.get("research", {}))
         self.execution = ExecutionLayer(self.config.get("execution", {}))
         self.risk = RiskLayer(self.config.get("risk", {}))
