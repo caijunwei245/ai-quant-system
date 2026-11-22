@@ -277,6 +277,9 @@ class QuantPipeline:
 
         self.log.info(f"开始回测 | {start_date} ~ {end_date}")
         engine_config = dict(self.backtest_config)
+        if "volume_unit" not in engine_config:
+            source = self.config.get("data.primary_source", "akshare")
+            engine_config["volume_unit"] = "lots" if source in ("akshare", "tushare") else "shares"
         engine = BacktestEngine(engine_config)
         trading_days = self._generate_trading_days(start_date, end_date)
         if len(trading_days) < 2:
