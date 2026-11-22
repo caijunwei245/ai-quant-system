@@ -85,9 +85,8 @@ def build_dataset_from_panel(panel_path, factor_processor, forward_days):
 
 def train_from_panel(panel_path, config, args):
     lgb_config = dict(config.get("lightgbm", {}))
-    # Allow overriding the CV AUC gate. Default 0.0 so the demo always yields a
-    # model; for production use a stricter threshold (e.g. --min-cv-auc 0.60).
-    lgb_config["min_cv_auc"] = float(args.min_cv_auc)
+    # The final untouched OOS period is a hard deployment gate.
+    lgb_config["min_oos_rank_ic"] = float(args.min_oos_rank_ic)
     # Lookback window for the cross-sectional training set. 0 = use all history
     # (recommended for the panel; the repo default is 30 trading days).
     lookback = int(args.lookback_days)
@@ -110,15 +109,12 @@ def train_from_panel(panel_path, config, args):
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         cv = meta.get("cv", {})
+        oos = meta.get("oos", {})
         logger.info(
-            "Trained model saved -> {} | CV mean_auc={:.4f}, samples={}".format(
-                layer.model_dir, cv.get("mean_auc"), meta.get("samples")
+            "Trained Ranker saved -> {} | CV RankIC={}, OOS RankIC={}, samples={}".format(
+                layer.model_dir, cv.get("mean_rank_ic"), oos.get("rank_ic"), meta.get("samples")
             )
         )
-        if cv.get("mean_auc", 0) < 0.60:
-            logger.warning(
-                "CV AUC below 0.60 - model signal is weak; use for demo only."
-            )
     else:
         logger.warning("Training did not produce screening_meta.json (CV gate).")
 
@@ -169,10 +165,10 @@ def main():
     parser.add_argument("--universe", help="Stock universe (live mode)", default=None)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument(
-        "--min-cv-auc",
+        "--min-oos-rank-ic",
         type=float,
         default=0.0,
-        help="CV AUC gate for final training (0.0=always train; prod >=0.60).",
+        help="Minimum independent OOS mean daily RankIC required to accept the Ranker.",
     )
     parser.add_argument(
         "--lookback-days",
