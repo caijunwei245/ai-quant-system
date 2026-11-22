@@ -55,6 +55,30 @@ def main():
             except Exception as exc:
                 source[adjust or "none"] = {"status":"error","error":repr(exc)}
         result["codes"][code] = source
+    # Independent Sina endpoint probe for one representative stock. This
+    # avoids repeatedly querying Eastmoney, which rate-limits bulk diagnostics.
+    try:
+        sina = ak.stock_zh_a_daily(
+            symbol="sh600000", start_date=START, end_date=END, adjust="qfq"
+        )
+        sina = sina.reset_index() if isinstance(sina.index, pd.DatetimeIndex) else sina.copy()
+        if "date" not in sina.columns and "日期" in sina.columns:
+            sina = sina.rename(columns={"日期": "date"})
+        if "date" in sina.columns:
+            sina["date"] = pd.to_datetime(sina["date"]).dt.strftime("%Y-%m-%d")
+            selected = sina[sina["date"].isin(SUSPECT_DATES)]
+            result["sina_600000_qfq"] = {
+                "status": "ok", "rows": int(len(sina)),
+                "date_min": sina["date"].min(), "date_max": sina["date"].max(),
+                "samples": selected.to_dict(orient="records"),
+            }
+        else:
+            result["sina_600000_qfq"] = {
+                "status": "unexpected_schema", "columns": list(sina.columns)
+            }
+    except Exception as exc:
+        result["sina_600000_qfq"] = {"status": "error", "error": repr(exc)}
+
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
