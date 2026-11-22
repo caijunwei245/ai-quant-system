@@ -74,11 +74,11 @@ class BacktestEngine:
         if len(calendar.index) == 0 and not ("date" in calendar.columns and len(calendar["date"]) > 0):
             raise ValueError("benchmark trading calendar is empty; refusing to synthesize weekdays")
         if "date" in calendar.columns and isinstance(calendar.index, pd.RangeIndex):
-            dates = pd.to_datetime(calendar["date"], errors="coerce")
+            dates = pd.DatetimeIndex(pd.to_datetime(calendar["date"], errors="coerce"))
         else:
-            dates = pd.to_datetime(calendar.index, errors="coerce")
+            dates = pd.DatetimeIndex(pd.to_datetime(calendar.index, errors="coerce"))
         if dates.isna().all() and "date" in calendar.columns:
-            dates = pd.to_datetime(calendar["date"], errors="coerce")
+            dates = pd.DatetimeIndex(pd.to_datetime(calendar["date"], errors="coerce"))
         start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
         if start_ts.tz is not None:
             start_ts = start_ts.tz_localize(None)
