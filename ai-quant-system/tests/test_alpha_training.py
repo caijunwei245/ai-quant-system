@@ -111,3 +111,60 @@ def test_independent_oos_rejects_unknown_dates_and_invalid_fraction():
         )
     with pytest.raises(ValueError, match="oos_fraction"):
         split_development_oos(list(calendar), calendar, oos_fraction=0.05)
+
+
+
+def test_train_model_uses_ranker_groups_and_keeps_oos_out_of_fit(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from layers import screening
+    from layers.screening import ScreeningLayer
+
+    dates = pd.bdate_range("2024-01-02", periods=100)
+    features, returns = {}, {}
+    for stock in range(6):
+        code = f"{stock:06d}"
+        features[code] = pd.DataFrame(
+            {"signal": np.full(len(dates), float(stock)),
+             "noise": np.sin(np.arange(len(dates)) + stock)},
+            index=dates,
+        )
+        returns[code] = pd.Series(
+            np.full(len(dates), (stock - 2.5) / 100.0), index=dates
+        )
+
+    fitted = []
+
+    class FakeRanker:
+        def __init__(self, **kwargs):
+            self.feature_importances_ = np.array([1, 0])
+
+        def fit(self, X, y, group):
+            assert sum(group) == len(X)
+            fitted.append((len(X), list(group)))
+            return self
+
+        def predict(self, X):
+            # First feature is stock identity and perfectly orders future returns.
+            return X[:, 0]
+
+    layer = ScreeningLayer({"lightgbm": {
+        "min_samples": 100, "min_group_size": 5, "oos_fraction": 0.2,
+        "n_splits": 3, "forward_days": 5, "embargo_days": 2,
+        "min_cv_train_samples": 20, "min_cv_validation_samples": 10,
+        "min_oos_rank_ic": 0.0, "n_estimators": 20,
+    }})
+    layer.model_dir = tmp_path
+    layer.data_fetcher = SimpleNamespace(
+        fetch_trading_calendar=lambda start, end: dates
+    )
+    fake_lgb = SimpleNamespace(LGBMRanker=FakeRanker)
+    with patch.object(screening, "HAS_LIGHTGBM", True), patch.object(screening, "lgb", fake_lgb, create=True):
+        layer._train_model(list(features), features, returns)
+
+    assert layer.is_trained
+    assert len(fitted) == 3  # two CV folds plus one final development-only fit
+    assert layer.model["metrics"]["oos"]["rank_ic"] == pytest.approx(1.0)
+    assert layer.model["metrics"]["oos_start"] == dates[80].strftime("%Y-%m-%d")
+    assert layer.model["metrics"]["oos_samples"] == 120
+    assert (tmp_path / "screening_meta.json").exists()
