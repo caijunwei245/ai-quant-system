@@ -30,12 +30,21 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
     invalid_codes = int((df["code"].str.len() != 6).sum())
     null_required = int(df[["code", "date"] + numeric].isna().any(axis=1).sum())
     duplicates = int(df.duplicated(["code", "date"]).sum())
-    bad_ohlc = int((
-        (df["open"] <= 0) | (df["high"] <= 0) | (df["low"] <= 0) | (df["close"] <= 0) |
+    zero_volume = df["volume"] == 0
+    positive_volume = df["volume"] > 0
+    nonpositive_price = (
+        (df[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    )
+    inconsistent_ohlc = (
         (df["high"] < df[["open", "close", "low"]].max(axis=1)) |
-        (df["low"] > df[["open", "close", "high"]].min(axis=1)) |
-        (df["volume"] < 0)
-    ).sum())
+        (df["low"] > df[["open", "close", "high"]].min(axis=1))
+    )
+    negative_volume = df["volume"] < 0
+    # A zero-volume row is a non-trading/suspension observation and is excluded
+    # from factor construction. Invalid prices/OHLC on a traded row remain fatal.
+    bad_traded_rows = int((positive_volume & (nonpositive_price | inconsistent_ohlc)).sum())
+    bad_ohlc = int((negative_volume | (positive_volume & (nonpositive_price | inconsistent_ohlc))).sum())
+    all_zero_ohlc = int((df[["open", "high", "low", "close"]] == 0).all(axis=1).sum())
     date_min = df["date"].min()
     date_max = df["date"].max()
     stocks = int(df["code"].nunique())
@@ -54,7 +63,7 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
         "invalid_stock_codes": invalid_codes,
         "rows_with_null_required_fields": null_required,
         "duplicate_code_date_rows": duplicates,
-        "invalid_ohlc_or_volume_rows": bad_ohlc,
+        "zero_volume_rows": int(zero_volume.sum()),\n        "all_zero_ohlc_rows": all_zero_ohlc,\n        "bad_traded_ohlc_rows": bad_traded_rows,\n        "negative_volume_rows": int(negative_volume.sum()),\n        "invalid_ohlc_or_volume_rows": bad_ohlc,
         "rows_per_date": {
             "min": int(rows_per_date.min()) if len(rows_per_date) else 0,
             "median": float(rows_per_date.median()) if len(rows_per_date) else 0,
@@ -75,7 +84,7 @@ def audit_panel(path, min_rows=1_000_000, min_stocks=200, min_dates=1_000,
     if invalid_dates or invalid_codes or null_required or duplicates or bad_ohlc:
         failures.append(
             f"integrity violations: invalid_dates={invalid_dates}, invalid_codes={invalid_codes}, "
-            f"null_required={null_required}, duplicate_code_date={duplicates}, bad_ohlc_or_volume={bad_ohlc}"
+            f"null_required={null_required}, duplicate_code_date={duplicates}, bad_traded_ohlc={bad_traded_rows}, negative_volume={int(negative_volume.sum())}"
         )
     audit["status"] = "failed" if failures else "passed"
     audit["failures"] = failures
