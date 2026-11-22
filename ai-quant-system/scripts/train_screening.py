@@ -111,6 +111,8 @@ def train_from_panel(panel_path, config, args):
     lgb_config["lookback_days"] = 10 ** 9 if args.lookback_days <= 0 else int(args.lookback_days)
     forward_days = int(lgb_config.get("forward_days", 5))
     layer = ScreeningLayer({"lightgbm": lgb_config, "data": config.get("data", {})})
+    layer.model_dir = Path(args.model_dir)
+    layer.model_path = layer.model_dir / "screening_model.json"
     # The panel's observed market sessions are the authoritative calendar for this offline run.
     layer.data_fetcher.fetch_trading_calendar = lambda start, end: trading_calendar[
         (trading_calendar >= pd.Timestamp(start)) & (trading_calendar <= pd.Timestamp(end))
@@ -137,8 +139,15 @@ def train_from_panel(panel_path, config, args):
 
     dates = pd.to_datetime(panel_df["date"]).dt.normalize()
     rows_by_date = dates.value_counts()
+    audit_path = Path(args.data_audit)
+    if not audit_path.is_file():
+        raise FileNotFoundError(f"Required pre-training data audit report missing: {audit_path}")
+    data_audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if data_audit.get("status") != "passed":
+        raise RuntimeError("Pre-training data audit was not passed; refusing to publish a training report.")
     report = {
         "status": "success",
+        "data_audit": data_audit,
         "dataset": {
             "path": str(panel_path), "rows": int(len(panel_df)),
             "stocks": int(panel_df["code"].nunique()),
@@ -169,6 +178,8 @@ def main():
     parser.add_argument("--min-oos-rank-ic", type=float, default=0.0)
     parser.add_argument("--lookback-days", type=int, default=0, help="0 = use all available history.")
     parser.add_argument("--report-dir", default="reports/alpha-training")
+    parser.add_argument("--data-audit", default="reports/alpha-training/data_audit.json")
+    parser.add_argument("--model-dir", default="models")
     args = parser.parse_args()
     config = load_config()
     train_from_panel(args.panel, config, args)
