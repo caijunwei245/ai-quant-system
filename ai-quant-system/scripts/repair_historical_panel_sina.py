@@ -70,7 +70,7 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
 
     for idx, code in enumerate(sorted(df["code"].unique()), start=1):
         local_idx = repaired.index[repaired["code"] == code]
-        local = repaired.loc[local_idx].sort_values("date").copy()
+        local = repaired.loc[local_idx].sort_values("date").copy()\n        local["_row_id"] = local.index
         try:
             sina = _load_sina_qfq(code, start, end)
             merged = local[["date", "volume", "amount"]].merge(
@@ -138,20 +138,11 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
             if bad_price.any():
                 raise ValueError(f"Rebuilt OHLC invalid rows: {int(bad_price.sum())}")
 
-            # Restore original row order by index and replace only OHLC/provenance.
-            local = local.set_index("date")
-            original = repaired.loc[local_idx].copy().set_index("date")
-            original.loc[local.index, PRICE_COLS] = local[PRICE_COLS]
-            original.loc[local.index, "price_source"] = local["price_source"]
-            original.loc[local.index, "price_adjustment"] = local["price_adjustment"]
-            repaired.loc[original.index.map(lambda d: repaired.index[repaired["code"] == code][0]), PRICE_COLS] = original[PRICE_COLS].to_numpy() if False else repaired.loc[local_idx, PRICE_COLS].to_numpy()
-
-            # Use date-keyed assignment to avoid relying on row order/index coincidences.
-            for date, row in local.iterrows():
-                mask = (repaired["code"] == code) & (repaired["date"] == date)
-                repaired.loc[mask, PRICE_COLS] = row[PRICE_COLS].to_numpy()
-                repaired.loc[mask, "price_source"] = row["price_source"]
-                repaired.loc[mask, "price_adjustment"] = "qfq"
+            # Replace OHLC/provenance by original row IDs; preserve all trading fields.
+            row_ids = local["_row_id"].to_numpy(dtype=int)
+            repaired.loc[row_ids, PRICE_COLS] = local[PRICE_COLS].to_numpy()
+            repaired.loc[row_ids, "price_source"] = local["price_source"].to_numpy()
+            repaired.loc[row_ids, "price_adjustment"] = "qfq"
 
             stock_reports[code] = {
                 "panel_rows": int(len(local)),
