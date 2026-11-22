@@ -442,6 +442,7 @@ class ScreeningLayer:
 
             # 构建当日特征 (使用 adjust="qfq" 匹配训练阶段缓存)
             X_day = []
+            scored_codes = []
             for code in stock_codes:
                 df = self.data_fetcher.fetch_stock_data(code, start_date="2021-01-01", end_date=date, adjust="qfq")
                 if df.empty:
@@ -462,17 +463,18 @@ class ScreeningLayer:
                     overlap = feat_vals.index.intersection(aligned.index)
                     aligned[overlap] = feat_vals[overlap]
                     X_day.append(aligned.values)
+                    scored_codes.append(code)
 
             if len(X_day) == 0:
                 return self._scoring_method(stock_codes, date)
 
             X_day = np.nan_to_num(np.array(X_day, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
-            # 预测概率
-            probs = model_obj.predict_proba(X_day)[:, 1]
+            # Ranker emits a continuous cross-sectional ranking score (not a probability).
+            rank_scores = model_obj.predict(X_day)
 
-            for code, prob in zip(stock_codes, probs):
-                scores[code] = float(prob)
+            for code, score in zip(scored_codes, rank_scores):
+                scores[code] = float(score)
 
         except Exception as e:
             logger.error(f"LightGBM预测失败: {e}, 使用评分法回退")
