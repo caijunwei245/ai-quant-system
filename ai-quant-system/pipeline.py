@@ -552,12 +552,9 @@ class QuantPipeline:
         return metrics
 
     def _generate_trading_days(self, start: str, end: str) -> list:
-        """Read the configured benchmark's actual daily sessions; never use weekdays."""
-        benchmark = self.backtest_config.get("benchmark", "000300.SH")
-        calendar = self.screening.data_fetcher.fetch_stock_data(
-            benchmark, start_date=start, end_date=end, adjust=""
-        )
-        return BacktestEngine.normalize_calendar(calendar, start, end)
+        """Read actual exchange sessions; fail rather than fabricate weekdays."""
+        dates = self.screening.data_fetcher.fetch_trading_calendar(start, end)
+        return [pd.Timestamp(day).strftime("%Y-%m-%d") for day in dates]
 
     def _save_backtest_results(self, results: list, metrics: dict) -> None:
         """保存回测结果"""
