@@ -176,6 +176,41 @@ class TestBacktestEngine(unittest.TestCase):
         with self.assertRaises(ValueError):
             BacktestEngine({"default_limit_pct": 1.0})
 
+
+    def test_volume_unit_lots_caps_fill_in_share_units(self):
+        engine = BacktestEngine({
+            "initial_capital": 100000,
+            "volume_unit": "lots",
+            "max_volume_participation": 0.10,
+        })
+        result = engine.step(
+            "2024-01-02", {"600000": 0.5},
+            {"600000": {"open": 10, "high": 10.2, "low": 9.9,
+                        "close": 10, "volume": 10}},
+        )
+        self.assertEqual(result["positions"]["600000"]["shares"], 100)
+
+    def test_locked_limit_up_buy_and_limit_down_sell_are_blocked(self):
+        engine = BacktestEngine({"initial_capital": 100000})
+        buy = engine.step(
+            "2024-01-02", {"600000": 0.5},
+            {"600000": {"open": 10, "high": 10, "low": 10,
+                        "close": 10, "volume": 100000, "locked_up": True}},
+        )
+        self.assertEqual(buy["n_positions"], 0)
+        engine.step(
+            "2024-01-03", {"600000": 0.5},
+            {"600000": {"open": 10, "high": 10.2, "low": 9.9,
+                        "close": 10, "volume": 100000}},
+        )
+        shares_before = engine.positions["600000"].shares
+        held = engine.step(
+            "2024-01-04", {},
+            {"600000": {"open": 9, "high": 9, "low": 9,
+                        "close": 9, "volume": 100000, "locked_down": True}},
+        )
+        self.assertEqual(held["positions"]["600000"]["shares"], shares_before)
+
     def test_no_leverage(self):
         with self.assertRaises(ValueError):
             self.engine.step("2024-01-02", {"600000": 1.1}, {})
