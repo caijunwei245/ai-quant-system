@@ -39,6 +39,9 @@ class BacktestEngine:
         self.slippage_rate = float(self.config.get("slippage", 0.001))
         self.lot_size = int(self.config.get("lot_size", 100))
         self.max_volume_participation = float(self.config.get("max_volume_participation", 0.10))
+        self.volume_unit = str(self.config.get("volume_unit", "shares")).lower()
+        if self.volume_unit not in ("shares", "lots"):
+            raise ValueError("volume_unit must be 'shares' or 'lots'")
         if not np.isfinite(self.max_volume_participation) or not 0 < self.max_volume_participation <= 1:
             raise ValueError("max_volume_participation must be in (0, 1]")
         self.default_limit_pct = float(self.config.get("default_limit_pct", 0.10))
@@ -127,6 +130,13 @@ class BacktestEngine:
             return False, "locked_limit_up" if side == "buy" else "locked_limit_down"
         return True, ""
 
+    def _max_fill_shares(self, bar: Mapping) -> int:
+        volume = self._number(bar, "volume", 0.0)
+        if not np.isfinite(volume) or volume <= 0:
+            return 0
+        volume_shares = volume * (100 if self.volume_unit == "lots" else 1)
+        return int(floor(volume_shares * self.max_volume_participation / self.lot_size) * self.lot_size)
+
     def _fee(self, notional: float, side: str) -> tuple[float, float]:
         commission = max(self.min_commission, notional * self.commission_rate) if notional > 0 else 0.0
         stamp_tax = notional * self.stamp_tax_rate if side == "sell" else 0.0
@@ -213,9 +223,7 @@ class BacktestEngine:
             if not ok:
                 continue
             sell_shares = position.shares - want
-            volume = self._number(bar, "volume", 0.0)
-            max_fill = int(floor(volume * self.max_volume_participation / self.lot_size) * self.lot_size)
-            sell_shares = min(sell_shares, max_fill)
+            sell_shares = min(sell_shares, self._max_fill_shares(bar))
             if want > 0:
                 sell_shares = int(floor(sell_shares / self.lot_size) * self.lot_size)
             if sell_shares <= 0:
@@ -243,9 +251,7 @@ class BacktestEngine:
             fill = ref * (1 + self.slippage_rate)
             per_share_cost = fill * (1 + self.commission_rate + self.stamp_tax_rate)
             affordable = max(0, int(floor((self.cash - self.min_commission) / per_share_cost / self.lot_size) * self.lot_size))
-            volume = self._number(bar, "volume", 0.0)
-            max_fill = int(floor(volume * self.max_volume_participation / self.lot_size) * self.lot_size)
-            buy_shares = min(add_shares, affordable, max_fill)
+            buy_shares = min(add_shares, affordable, self._max_fill_shares(bar))
             while buy_shares > 0:
                 notional = buy_shares * fill
                 commission, _ = self._fee(notional, "buy")
