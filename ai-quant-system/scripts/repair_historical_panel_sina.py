@@ -81,8 +81,9 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
             missing_mask = merged["_merge"] == "left_only"
             missing_positive_volume = missing_mask & (merged["volume_panel"] > 0)
             if missing_positive_volume.any():
+                missing_dates = merged.loc[missing_positive_volume, "date"].dt.strftime("%Y-%m-%d").tolist()
                 raise ValueError(
-                    f"{int(missing_positive_volume.sum())} traded panel dates missing from Sina"
+                    f"{len(missing_dates)} traded panel dates missing from Sina: {missing_dates}"
                 )
 
             matched = merged["_merge"] == "both"
