@@ -109,7 +109,7 @@ def repair_panel(panel_path, output_path, report_path, sleep_seconds=0.5):
             if amount_p99 is None or amount_p99 > 0.001:
                 raise ValueError(f"Amount reconciliation p99 relative error too large: {amount_p99}")
 
-            price_frame = merged[["date"] + [f"{x}_sina" for x in PRICE_COLS]].copy()
+            price_frame = merged[["date"] + PRICE_COLS].copy()
             price_frame.columns = ["date"] + PRICE_COLS
             local = local.drop(columns=PRICE_COLS + ["price_source", "price_adjustment"]).merge(
                 price_frame, on="date", how="left", validate="one_to_one"
