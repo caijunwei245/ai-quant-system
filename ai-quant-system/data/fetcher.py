@@ -163,6 +163,48 @@ class DataFetcher:
         self._cache[cache_key] = stocks
         return stocks
 
+    @staticmethod
+    def _normalize_calendar_dates(raw_dates, start_date: str, end_date: str) -> pd.DatetimeIndex:
+        """Normalize, de-duplicate, and bound provider-supplied exchange sessions."""
+        dates = pd.DatetimeIndex(pd.to_datetime(raw_dates, errors="coerce"))
+        dates = dates[~dates.isna()]
+        if dates.tz is not None:
+            dates = dates.tz_localize(None)
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+        if start.tz is not None:
+            start = start.tz_localize(None)
+        if end.tz is not None:
+            end = end.tz_localize(None)
+        if pd.isna(start) or pd.isna(end) or start > end:
+            raise ValueError("calendar start/end must be valid and start must not exceed end")
+        dates = dates.normalize().unique().sort_values()
+        return dates[(dates >= start.normalize()) & (dates <= end.normalize())]
+
+    def fetch_trading_calendar(self, start_date: str, end_date: str) -> pd.DatetimeIndex:
+        """Fetch the exchange trading calendar from AKShare; never fabricate weekdays."""
+        self._normalize_calendar_dates([], start_date, end_date)  # validate requested bounds
+        try:
+            import akshare as ak
+            calendar = ak.tool_trade_date_hist_sina()
+            if calendar is None or calendar.empty:
+                raise ValueError("AKShare returned an empty exchange calendar")
+            date_col = "trade_date" if "trade_date" in calendar.columns else calendar.columns[0]
+            dates = self._normalize_calendar_dates(calendar[date_col], start_date, end_date)
+            if len(dates):
+                return dates
+        except Exception as exc:
+            logger.warning(f"获取交易所日历失败，尝试基准指数行情日历: {exc}")
+
+        benchmark = self.config.get("benchmark", "000300.SH")
+        frame = self.fetch_stock_data(benchmark, start_date=start_date, end_date=end_date, adjust="")
+        if frame is None or frame.empty:
+            raise RuntimeError("无法获取交易所日历或基准指数交易日数据")
+        dates = self._normalize_calendar_dates(frame.index, start_date, end_date)
+        if not len(dates):
+            raise RuntimeError("基准指数数据中没有请求区间的交易日")
+        return dates
+
     def fetch_market_index(self, index_code: str = "000300.SH") -> pd.DataFrame:
         """获取指数数据 (带缓存)"""
         cache_key = self._get_cache_key(index_code, "2020-01-01", datetime.now().strftime("%Y-%m-%d"), adjust="")

@@ -106,16 +106,22 @@ screening:
         params: {window: 20}
   # LightGBM模型配置
   lightgbm:
+    objective: "lambdarank"
+    metric: "ndcg"
     learning_rate: 0.05
     n_estimators: 500
     max_depth: 6
-    num_leaves: 63
-    min_child_samples: 100
-    feature_fraction: 0.8
-    bagging_fraction: 0.8
-    bagging_freq: 5
-    reg_alpha: 0.1
-    reg_lambda: 0.1
+    num_leaves: 31
+    min_child_samples: 30
+    forward_days: 5
+    embargo_days: 2
+    n_splits: 5
+    min_group_size: 5
+    min_samples: 100
+    min_cv_train_samples: 50
+    min_cv_validation_samples: 10
+    oos_fraction: 0.2
+    min_oos_rank_ic: 0.0
     verbose: -1
     n_jobs: -1
   # 选股策略

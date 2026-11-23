@@ -1,0 +1,540 @@
+## 第二阶段代码级审计开始
+
+我会按真实代码路径审计，而不是继续停留在架构层。
+
+目前我能确认的仓库设计信息来自 README：
+
+- `pipeline.py`：主调度器
+- `layers/screening.py`：LightGBM 初筛
+- `layers/research.py`：TradingAgents
+- `layers/execution.py`：PPO 执行
+- `layers/risk.py`：DoubleEnsemble 风控
+- `data/processor.py`：因子处理
+- `scripts/train_screening.py`
+- `scripts/train_ppo.py`
+
+fileciteturn0file0
+
+但是当前会话中我还没有拿到这些 `.py` 源文件内容，因此不能假装已经看到代码并给出“某行有 bug”的结论。
+
+第二阶段我会按下面方式进行：
+
+---
+
+# 1. pipeline.py 审计
+
+重点检查：
+
+## 数据流
+
+目标：
+
+确认：
+
+``` id="jajznb"
+行情
+ ↓
+因子
+ ↓
+模型
+ ↓
+信号
+ ↓
+组合
+ ↓
+交易
+```
+
+是否存在：
+
+- 数据重复计算
+- 未来函数
+- 模型输出污染
+- 层之间耦合
+
+
+重点搜索：
+
+```python id="0l4fc9"
+fit()
+train()
+predict()
+transform()
+```
+
+风险：
+
+例如：
+
+```python id="f788ah"
+processor.fit(all_data)
+```
+
+然后：
+
+```python id="49msm1"
+train/test split
+```
+
+这是典型未来数据泄漏。
+
+正确：
+
+``` id="u8lc0x"
+train period
+     |
+fit scaler/factor
+     |
+test period
+     |
+transform only
+```
+
+---
+
+# 2. screening.py 审计（最高优先级）
+
+README 中说明：
+
+> LightGBM 负责全市场因子选股，预测未来5日涨跌
+
+fileciteturn0file0
+
+
+重点检查：
+
+---
+
+## Label 构造
+
+寻找：
+
+```python id="p6dkny"
+future_return
+```
+
+或者：
+
+```python id="5pi5ff"
+shift(-5)
+```
+
+检查：
+
+是否：
+
+```python id="t6hcjs"
+df["label"] =
+df.close.shift(-5)>df.close
+```
+
+如果是：
+
+问题：
+
+- 没处理停牌
+- 没处理涨跌停
+- 没处理复权
+- 没处理交易日
+
+---
+
+## 特征泄漏
+
+检查：
+
+危险：
+
+```python id="ui5ii3"
+rolling()
+mean()
+std()
+```
+
+是否：
+
+缺少：
+
+```python id="33f66i"
+shift(1)
+```
+
+例如：
+
+错误：
+
+```python id="gvn7id"
+df["ma20"]=
+df.close.rolling(20).mean()
+```
+
+如果当天收盘后交易：
+
+可以。
+
+如果盘中：
+
+泄漏。
+
+
+---
+
+## 模型训练
+
+检查：
+
+是否：
+
+```python id="mqds2l"
+train_test_split()
+```
+
+如果存在：
+
+严重问题。
+
+
+金融时间序列禁止随机切分。
+
+
+应该：
+
+```python id="yinlel"
+TimeSeriesSplit
+```
+
+或者：
+
+Walk Forward。
+
+---
+
+# 3. processor.py 因子系统审计
+
+README：
+
+当前：
+
+50+因子
+
+包括：
+
+- 技术指标
+- 量价
+- 动量
+- 反转
+
+fileciteturn0file0
+
+
+检查：
+
+## 因子质量
+
+增加：
+
+必须输出：
+
+``` id="as2yyu"
+factor
+IC
+RankIC
+IC_IR
+turnover
+decay
+```
+
+例如：
+
+``` id="qrvikx"
+momentum20
+
+IC:
+0.031
+
+IC_IR:
+0.45
+
+decay:
+8 days
+```
+
+否则不知道因子是否有效。
+
+---
+
+# 4. execution.py PPO 审计
+
+这是第二危险模块。
+
+README：
+
+PPO：
+
+> 动态仓位微调
+
+fileciteturn0file0
+
+
+重点检查：
+
+---
+
+## Environment
+
+确认是否标准：
+
+```python id="thspfp"
+gymnasium.Env
+```
+
+README 提到已经升级：
+
+fileciteturn0file0
+
+
+检查：
+
+是否包含：
+
+state:
+
+应该至少：
+
+``` id="2zgw7e"
+portfolio value
+cash
+positions
+alpha score
+market regime
+volatility
+drawdown
+```
+
+---
+
+## Reward
+
+检查：
+
+危险：
+
+```python id="rr8e6l"
+reward = portfolio_return
+```
+
+应该：
+
+```python id="ydy13m"
+reward =
+return
+- transaction_cost
+- volatility_penalty
+- drawdown_penalty
+```
+
+否则 PPO 会学习：
+
+高风险赌博。
+
+
+---
+
+# 5. risk.py 风控审计
+
+README：
+
+包含：
+
+- 个股风控
+- 组合风控
+- 市场风控
+
+fileciteturn0file0
+
+
+重点检查：
+
+---
+
+## 止损
+
+寻找：
+
+```python id="vcn42l"
+stop_loss
+trailing_stop
+```
+
+确认：
+
+是否：
+
+只看价格。
+
+升级：
+
+加入：
+
+``` id="4jfwhe"
+因子恶化
+流动性下降
+市场状态变化
+```
+
+---
+
+## VaR
+
+检查：
+
+是否真的计算：
+
+还是：
+
+固定比例。
+
+
+应该：
+
+```python id="uohcq1"
+Portfolio VaR
++
+Marginal VaR
++
+Contribution VaR
+```
+
+---
+
+# 6. backtest 审计
+
+这是决定系统是否可信的地方。
+
+必须检查：
+
+## 是否模拟：
+
+### 手续费
+
+A股：
+
+```python id="fixv1a"
+佣金
+印花税
+过户费
+```
+
+---
+
+### 滑点
+
+至少：
+
+```python id="zbl4pi"
+成交价 =
+signal price
++
+spread
++
+impact
+```
+
+---
+
+### 成交限制
+
+需要：
+
+```python id="czz9ac"
+涨停买不到
+跌停卖不出
+停牌不可交易
+```
+
+---
+
+# 第二阶段输出格式
+
+拿到源码后，我会输出：
+
+## 《ai-quant-system代码审计报告》
+
+包含：
+
+### A. Bug列表
+
+例如：
+
+| 文件 | 行为 | 风险 | 优先级 |
+|-|-|-|-|
+| screening.py | 随机切分数据 | 回测虚高 | P0 |
+| processor.py | 未shift因子 | 未来泄漏 | P0 |
+| execution.py | reward过简 | PPO失效 | P1 |
+
+---
+
+### B. 架构改造Patch
+
+例如：
+
+``` id="n7oa9i"
+旧:
+
+Binary Classification
+
+↓
+
+新:
+
+Cross-sectional Ranking Model
+```
+
+---
+
+### C. 生产级目录调整
+
+目标：
+
+``` id="89pldt"
+ai-quant-system
+
+├── feature_store
+├── factor_engine
+├── alpha_model
+├── portfolio_optimizer
+├── risk_engine
+├── execution
+├── monitoring
+└── research_notebook
+```
+
+---
+
+### D. 90天升级路线
+
+分：
+
+- Week 1-2 修数据泄漏
+- Week 3-4 建可靠回测
+- Month 2 Alpha升级
+- Month 3 实盘模拟
+
+---
+
+请把仓库源码（至少这些文件）上传：
+
+``` id="zqh5pt"
+pipeline.py
+layers/
+ ├── screening.py
+ ├── research.py
+ ├── execution.py
+ └── risk.py
+
+data/
+ ├── processor.py
+ └── fetcher.py
+```
+
+我就可以继续做真正的**逐文件代码审计 + 修改建议**。

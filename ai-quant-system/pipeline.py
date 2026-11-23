@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from loguru import logger
 
+from backtest.engine import BacktestEngine
 from utils.config_loader import load_config
 from layers.screening import ScreeningLayer
 from layers.research import ResearchLayer
@@ -47,8 +48,10 @@ class QuantPipeline:
         )
         self.log = get_logger("pipeline")
 
-        # 初始化四层
-        self.screening = ScreeningLayer(self.config.get("screening", {}))
+        # 初始化四层；将统一数据源配置显式传入初筛数据获取器
+        screening_config = dict(self.config.get("screening", {}))
+        screening_config["data"] = self.config.get("data", {})
+        self.screening = ScreeningLayer(screening_config)
         self.research = ResearchLayer(self.config.get("research", {}))
         self.execution = ExecutionLayer(self.config.get("execution", {}))
         self.risk = RiskLayer(self.config.get("risk", {}))
@@ -198,50 +201,172 @@ class QuantPipeline:
 
         return result
 
+    def _get_backtest_target_weights(self, signal_date: str, stock_pool: str) -> dict:
+        """Generate weights after signal_date close; they are filled next session."""
+        screening_cfg = self.config.get("screening", {})
+        if not screening_cfg.get("enabled", True):
+            return {}
+
+        screened = self.screening.run_screening(date=signal_date, universe=stock_pool)
+        candidates = screened.get("candidate_stocks", [])
+        research_cfg = self.config.get("research", {})
+        if research_cfg.get("enabled", True) and candidates:
+            researched = self.research.run_research(candidate_stocks=candidates, date=signal_date)
+            verified = researched.get("verified_stocks", [])
+        else:
+            verified = candidates
+
+        execution_cfg = self.config.get("execution", {})
+        if execution_cfg.get("enabled", True) and verified:
+            optimized = self.execution.optimize_positions(
+                verified_stocks=verified,
+                market_state=self._get_market_state(signal_date),
+                date=signal_date,
+            )
+            weights = optimized.get("positions", {})
+        else:
+            weights = {}
+
+        weights = {str(code): float(weight) for code, weight in weights.items()
+                   if float(weight) > 0}
+        total = sum(weights.values())
+        if total > 1.0:
+            weights = {code: weight / total for code, weight in weights.items()}
+        return weights
+
+    def _load_backtest_price_frame(self, code: str, start_date: str, end_date: str,
+                                   cache: dict) -> pd.DataFrame:
+        """Load unadjusted OHLCV bars once per symbol for execution and valuation."""
+        if code in cache:
+            return cache[code]
+        fetcher = self.screening.data_fetcher
+        frame = fetcher.fetch_stock_data(
+            code, start_date=start_date, end_date=end_date, adjust=""
+        )
+        if frame is None or frame.empty:
+            cache[code] = pd.DataFrame()
+            return cache[code]
+        frame = frame.copy()
+        frame.columns = [str(column).strip().lower() for column in frame.columns]
+        if "date" in frame.columns:
+            frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+            frame = frame.dropna(subset=["date"]).set_index("date")
+        else:
+            frame.index = pd.to_datetime(frame.index, errors="coerce")
+            frame = frame.loc[~frame.index.isna()]
+        frame.index = frame.index.normalize()
+        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+        required = {"open", "high", "low", "close", "volume"}
+        if not required.issubset(frame.columns):
+            missing = sorted(required - set(frame.columns))
+            raise ValueError(f"{code} OHLCV data missing columns: {missing}")
+        if "pre_close" not in frame.columns:
+            frame["pre_close"] = pd.to_numeric(frame["close"], errors="coerce").shift(1)
+        cache[code] = frame
+        return frame
+
     def run_backtest(
         self,
         start_date: str = None,
         end_date: str = None,
         stock_pool: str = "all_a_share"
     ) -> Dict:
-        """
-        执行回测
-
-        Args:
-            start_date: 回测起始日期
-            end_date: 回测结束日期
-            stock_pool: 股票池
-
-        Returns:
-            回测结果
-        """
+        """Run a daily-bar backtest with next-session-open fills and close marking."""
         if start_date is None:
             start_date = self.backtest_config.get("start_date", "2024-01-01")
         if end_date is None:
             end_date = self.backtest_config.get("end_date", "2025-12-31")
 
         self.log.info(f"开始回测 | {start_date} ~ {end_date}")
-
-        # 生成交易日序列
+        engine_config = dict(self.backtest_config)
+        if "volume_unit" not in engine_config:
+            source = getattr(self.screening.data_fetcher, "primary_source", "akshare")
+            engine_config["volume_unit"] = "lots" if source in ("akshare", "tushare") else "shares"
+        engine = BacktestEngine(engine_config)
         trading_days = self._generate_trading_days(start_date, end_date)
+        if len(trading_days) < 2:
+            raise ValueError("回测至少需要两个真实交易日，才能使用前一日信号、下一日开盘成交")
 
-        backtest_results = []
-        for date in trading_days:
-            result = self.run_daily(date, mode="backtest")
-            backtest_results.append(result)
+        # Include warm-up bars for previous-close/limit checks.
+        warmup_start = (pd.Timestamp(start_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+        price_cache = {}
+        target_weights = {}
+        results = []
+        self.trade_history = []
+        self.performance_history = []
 
-        # 计算回测指标
-        metrics = self._calculate_backtest_metrics(backtest_results)
+        for index, date in enumerate(trading_days):
+            trade_date = pd.Timestamp(date)
+            active_codes = set(engine.positions) | set(target_weights)
+            bars = {}
+            for code in sorted(active_codes):
+                frame = self._load_backtest_price_frame(code, warmup_start, end_date, price_cache)
+                if not frame.empty and trade_date in frame.index:
+                    bars[code] = frame.loc[trade_date]
 
-        # 保存结果
-        self._save_backtest_results(backtest_results, metrics)
+            before = len(engine.trades)
+            snapshot = engine.step(date, target_weights, bars)
+            day_trades = engine.trades[before:]
+            daily = {
+                "date": date,
+                "trades": day_trades,
+                "portfolio": {
+                    "value": snapshot["nav"],
+                    "cash": snapshot["cash"],
+                    "market_value": snapshot["market_value"],
+                    "n_positions": snapshot["n_positions"],
+                    "gross_exposure": snapshot["gross_exposure"],
+                },
+                "positions": snapshot["positions"],
+                "stale_marks": snapshot["stale_marks"],
+            }
+            results.append(daily)
+            self.performance_history.append({
+                "date": date, "value": snapshot["nav"], "cash": snapshot["cash"],
+                "daily_return": (snapshot["nav"] / results[-2]["portfolio"]["value"] - 1)
+                                if len(results) > 1 and results[-2]["portfolio"]["value"] else 0.0,
+            })
 
-        self.log.info(f"回测完成 | 总收益: {metrics.get('total_return', 0):.2%} | 夏普: {metrics.get('sharpe_ratio', 0):.3f}")
+            # Today's close is now known. Only now generate the target for the
+            # next exchange session, preventing same-close look-ahead fills.
+            if index < len(trading_days) - 1:
+                target_weights = self._get_backtest_target_weights(date, stock_pool)
 
+        self.trade_history = engine.trades
+        final_snapshot = engine.history[-1]
+        self.portfolio = {
+            "value": final_snapshot["nav"],
+            "cash": final_snapshot["cash"],
+            "positions": {code: data["shares"] for code, data in final_snapshot["positions"].items()},
+            "entry_date": {},
+        }
+
+        values = [item["portfolio"]["value"] for item in results]
+        daily_returns = pd.Series(values, dtype=float).pct_change().dropna()
+        metrics = {
+            "initial_capital": engine.initial_capital,
+            "final_value": float(values[-1]),
+            "total_return": float(values[-1] / engine.initial_capital - 1),
+            "annualized_return": annualized_return(daily_returns) if len(daily_returns) else 0.0,
+            "sharpe_ratio": sharpe_ratio(daily_returns) if len(daily_returns) else 0.0,
+            "max_drawdown": max_drawdown(daily_returns) if len(daily_returns) else 0.0,
+            "win_rate": win_rate(daily_returns) if len(daily_returns) else 0.0,
+            "profit_loss_ratio": profit_loss_ratio(daily_returns) if len(daily_returns) else 0.0,
+            "calmar_ratio": calmar_ratio(daily_returns) if len(daily_returns) else 0.0,
+            "sortino_ratio": sortino_ratio(daily_returns) if len(daily_returns) else 0.0,
+            "n_trading_days": int(len(daily_returns)),
+            "n_trades": len(engine.trades),
+            "values": values,
+        }
+        self._save_backtest_results(results, metrics)
+        self.log.info(
+            f"回测完成 | 总收益: {metrics['total_return']:.2%} | "
+            f"夏普: {metrics['sharpe_ratio']:.3f} | 成交笔数: {metrics['n_trades']}"
+        )
         return {
-            "results": backtest_results,
+            "results": results,
             "metrics": metrics,
-            "period": {"start": start_date, "end": end_date},
+            "period": {"start": trading_days[0], "end": trading_days[-1]},
         }
 
     def run_live(
@@ -432,11 +557,9 @@ class QuantPipeline:
         return metrics
 
     def _generate_trading_days(self, start: str, end: str) -> list:
-        """生成交易日序列 (简化: 包含所有日期)"""
-        start_dt = pd.to_datetime(start)
-        end_dt = pd.to_datetime(end)
-        days = pd.date_range(start_dt, end_dt, freq="B")  # 工作日
-        return [d.strftime("%Y-%m-%d") for d in days]
+        """Read actual exchange sessions; fail rather than fabricate weekdays."""
+        dates = self.screening.data_fetcher.fetch_trading_calendar(start, end)
+        return [pd.Timestamp(day).strftime("%Y-%m-%d") for day in dates]
 
     def _save_backtest_results(self, results: list, metrics: dict) -> None:
         """保存回测结果"""

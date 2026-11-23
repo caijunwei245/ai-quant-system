@@ -1,0 +1,133 @@
+name: Historical CSI300 Alpha training
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/backtest-accounting-engine
+    paths:
+      - "ai-quant-system/scripts/train_screening.py"
+      - "ai-quant-system/scripts/validate_historical_panel.py"
+      - "ai-quant-system/layers/screening.py"
+      - "ai-quant-system/data/alpha_training.py"
+      - "ai-quant-system/data/panel_loader.py"
+      - "ai-quant-system/scripts/diagnose_price_adjustment.py"
+      - "ai-quant-system/scripts/repair_historical_panel_sina.py"
+      - ".github/workflows/historical-alpha-training.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: ai-quant-system
+    steps:
+      - name: Checkout training code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ai-quant-system/requirements.txt
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scikit-learn loguru pyyaml lightgbm akshare
+
+      - name: Download the exact full panel from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data reports/alpha-training
+          PANEL_URL="https://raw.githubusercontent.com/caijunwei245/ai-quant-system/main/data0727/csi300_daily_2010_2026.csv.gz"
+          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 30 \
+            "$PANEL_URL" -o data/csi300_daily_2010_2026.csv.gz
+          test -s data/csi300_daily_2010_2026.csv.gz
+          sha256sum data/csi300_daily_2010_2026.csv.gz | tee reports/alpha-training/panel_sha256.txt
+          gzip -t data/csi300_daily_2010_2026.csv.gz
+
+      - name: Diagnose suspect bars against independent raw, qfq and hfq sources
+        continue-on-error: true
+        run: |
+          python scripts/diagnose_price_adjustment.py \
+            --panel data/csi300_daily_2010_2026.csv.gz \
+            --output reports/alpha-training/adjustment_diagnosis.json
+
+      - name: Rebuild OHLC from independent Sina qfq data (fail closed)
+        run: |
+          python scripts/repair_historical_panel_sina.py \
+            --panel data/csi300_daily_2010_2026.csv.gz \
+            --output data/csi300_daily_2010_2026_repaired.csv.gz \
+            --report reports/alpha-training/repair_report.json \
+            --sleep-seconds 0.5
+
+      - name: Audit complete historical panel (fail closed)
+        run: |
+          python scripts/validate_historical_panel.py \
+            --panel data/csi300_daily_2010_2026_repaired.csv.gz \
+            --output reports/alpha-training/data_audit.json \
+            --min-rows 900000 --min-stocks 200 --min-dates 1000 \
+            --min-start 2010-12-31 --min-end 2026-01-01
+
+      - name: Commit repaired panel and provenance to PR branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/csi300_daily_2010_2026_repaired.csv.gz reports/alpha-training/repair_report.json reports/alpha-training/adjustment_diagnosis.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Add independently repaired CSI300 historical panel"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Train LambdaRank on the verified full panel only
+        run: |
+          python scripts/train_screening.py \
+            --panel data/csi300_daily_2010_2026_repaired.csv.gz \
+            --data-audit reports/alpha-training/data_audit.json \
+            --report-dir reports/alpha-training \
+            --model-dir models \
+            --lookback-days 0 \
+            --min-oos-rank-ic 0.0
+
+      - name: Enforce complete training report
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("reports/alpha-training/alpha_training_report.json").read_text())
+          assert report["status"] == "success"
+          repair = json.loads(Path("reports/alpha-training/repair_report.json").read_text())
+          assert repair["status"] == "passed"
+          assert repair["stocks_repaired"] == 300
+          assert report["data_audit"]["status"] == "passed"
+          training = report["training"]
+          assert training["cv"]["n_folds"] >= 2
+          assert len(training["cv"]["folds"]) == training["cv"]["n_folds"]
+          assert training["oos"]["rank_ic"] is not None
+          coverage = training["oos_coverage"]
+          assert coverage["trading_dates"] > 0
+          assert coverage["samples"] > 0
+          assert coverage["unique_stocks"] >= 100
+          assert Path("reports/alpha-training/alpha_training_report.md").is_file()
+          assert Path("models/screening_model.txt").is_file()
+          print("Verified: full-panel audit, CV folds, OOS metrics/coverage and model artifact.")
+          PY
+
+      - name: Upload audit, training report and model artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-csi300-alpha-${{ github.run_number }}
+          path: |
+            ai-quant-system/reports/alpha-training/
+            ai-quant-system/models/
+            ai-quant-system/data/csi300_daily_2010_2026_repaired.csv.gz
+          if-no-files-found: warn
+          retention-days: 30

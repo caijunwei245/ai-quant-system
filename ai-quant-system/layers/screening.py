@@ -10,7 +10,6 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import make_scorer
 from loguru import logger
 
@@ -41,7 +40,7 @@ class ScreeningLayer:
         self.selection_config = self.config.get("selection", {})
         self.factors_config = self.config.get("factors", {})
 
-        self.data_fetcher = DataFetcher()
+        self.data_fetcher = DataFetcher(self.config.get("data", {}))
         self.factor_processor = FactorProcessor()
 
         self.model = None
@@ -228,474 +227,167 @@ class ScreeningLayer:
         return self.data_fetcher.fetch_stock_list(market)
 
     def build_training_dataset(
-        self,
-        valid_stocks: List[str],
-        all_features: Dict[str, pd.DataFrame],
-        all_labels: Dict[str, pd.Series],
-        lookback_days: int = 30,
-        min_samples: int = 100,
-        forward_days: int = 5,
-    ) -> Tuple[np.ndarray, np.ndarray, List[str], List[str], List[pd.Timestamp]]:
-        """
-        构建用于训练的横截面数据集
-        Returns: X, y, stock_codes, feature_names, sample_dates
-        """
-        X_list = []
-        y_list = []
-        stock_codes = []
-        sample_dates = []
+        self, valid_stocks, all_features, all_labels,
+        lookback_days=0, min_samples=100, forward_days=5,
+    ):
+        """Build date-sorted cross-sectional relevance groups for LambdaRank."""
+        from data.alpha_training import build_rank_dataset
+        result = build_rank_dataset(
+            valid_stocks, all_features, all_labels,
+            min_group_size=int(self.lgb_config.get("min_group_size", 5)),
+        )
+        X, relevance, raw_returns, stock_codes, feature_names, sample_dates, groups = result
+        if lookback_days > 0:
+            dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+            keep_dates = sorted(dates.unique())[-int(lookback_days):]
+            mask = dates.isin(keep_dates)
+            X, relevance, raw_returns = X[mask], relevance[mask], raw_returns[mask]
+            stock_codes = [c for c, keep in zip(stock_codes, mask) if keep]
+            sample_dates = [d for d, keep in zip(sample_dates, mask) if keep]
+            dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+            groups = [int((dates == d).sum()) for d in dates.unique()]
+        if len(X) < min_samples:
+            raise ValueError(f"training samples insufficient: {len(X)} < {min_samples}")
+        return X, relevance, raw_returns, stock_codes, feature_names, sample_dates, groups
 
-        # 确定可用训练日期 (交集)
-        all_dates_sets = []
-        for code in valid_stocks:
-            if code in all_labels:
-                all_dates_sets.append(set(all_labels[code].dropna().index))
-        common_dates = sorted(set.intersection(*all_dates_sets)) if all_dates_sets else []
-
-        dates = common_dates[-lookback_days:] if len(common_dates) >= lookback_days else common_dates
-        if len(dates) < max(5, int(lookback_days / 3)):
-            # 回退到第一个股票的最近日期窗口
-            try:
-                dates = sorted(all_labels[valid_stocks[0]].index)[-max(10, lookback_days // 2):]
-            except Exception:
-                dates = []
-
-        # 全局特征列 (取所有股票在这些日期有值的列并集)
-        global_cols = set()
-        for code in valid_stocks:
-            feat_df = all_features.get(code)
-            if feat_df is None or feat_df.empty:
+    def _purged_kfold_cv(
+        self, X, y, sample_dates, raw_returns, trading_calendar,
+        n_splits=5, embargo_days=2, forward_days=5,
+    ):
+        """Strict expanding-window LambdaRank CV on exchange-session ranks."""
+        from data.alpha_training import purged_walk_forward_splits, rank_metrics
+        report = {"folds": [], "mean_rank_ic": None, "mean_top_bottom_return": None,
+                  "n_folds": 0}
+        splits = list(purged_walk_forward_splits(
+            sample_dates, trading_calendar, n_splits=n_splits,
+            forward_days=forward_days, embargo_days=embargo_days,
+            min_train_samples=int(self.lgb_config.get("min_cv_train_samples", 50)),
+            min_validation_samples=int(self.lgb_config.get("min_cv_validation_samples", 10)),
+        ))
+        params = {
+            "objective": "lambdarank", "metric": "ndcg",
+            "ndcg_eval_at": [5, 10], "verbosity": -1,
+            "learning_rate": self.lgb_config.get("learning_rate", 0.05),
+            "n_estimators": max(50, int(self.lgb_config.get("n_estimators", 500) // 5)),
+            "num_leaves": self.lgb_config.get("num_leaves", 31),
+            "random_state": 42, "n_jobs": -1,
+        }
+        dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+        for fold, train_idx, val_idx, val_start, val_end in splits:
+            train_groups = [int((dates[train_idx] == d).sum()) for d in dates[train_idx].unique()]
+            val_groups = [int((dates[val_idx] == d).sum()) for d in dates[val_idx].unique()]
+            if not train_groups or not val_groups:
                 continue
-            common = feat_df.loc[feat_df.index.intersection(dates)].dropna(how="all")
-            if not common.empty:
-                global_cols.update(common.columns.tolist())
-        global_cols = sorted(list(global_cols))
-
-        for date in dates:
-            for code in valid_stocks:
-                feat_df = all_features.get(code)
-                if feat_df is None or date not in feat_df.index:
-                    continue
-                row = feat_df.loc[date]
-                aligned = pd.Series(0.0, index=global_cols)
-                valid_vals = row.dropna()
-                overlap = valid_vals.index.intersection(global_cols)
-                aligned[overlap] = valid_vals[overlap]
-                feat_vals = aligned.values
-
-                if feat_vals is None or len(feat_vals) < 3:
-                    continue
-
-                label = all_labels.get(code, pd.Series()).get(date, np.nan)
-                if pd.isna(label):
-                    continue
-
-                X_list.append(feat_vals)
-                y_list.append(1 if label > 0.01 else 0)
-                stock_codes.append(code)
-                # record sample date (pd.Timestamp)
-                sample_dates.append(pd.to_datetime(date))
-
-        if len(X_list) < min_samples:
-            logger.warning(f"训练样本不足: {len(X_list)} < {min_samples}")
-            return np.empty((0, 0)), np.empty((0,)), [], [], []
-
-        X = np.nan_to_num(np.array(X_list, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-        y = np.array(y_list, dtype=np.int32)
-
-        return X, y, stock_codes, global_cols, sample_dates
-
-    def _time_series_cv(self, X: np.ndarray, y: np.ndarray, n_splits: int = 5) -> Dict[str, float]:
-        """
-        基于TimeSeriesSplit的简单时序交叉验证
-        返回: 字典 {"mean_auc":..., "std_auc":...}
-        (保留为回退方法, 主要使用_purged_kfold_cv)
-        """
-        from sklearn.metrics import roc_auc_score
-
-        if X.size == 0 or len(y) < 20:
-            return {"mean_auc": 0.0, "std_auc": 0.0, "n_splits": 0}
-
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        aucs = []
-        for train_idx, val_idx in tscv.split(X):
-            try:
-                X_tr, X_val = X[train_idx], X[val_idx]
-                y_tr, y_val = y[train_idx], y[val_idx]
-                model = lgb.LGBMClassifier(**{
-                    "objective": "binary",
-                    "n_estimators": max(50, int(self.lgb_config.get("n_estimators", 500) // 5)),
-                    "learning_rate": self.lgb_config.get("learning_rate", 0.05),
-                    "random_state": 42,
-                })
-                model.fit(X_tr, y_tr)
-                probs = model.predict_proba(X_val)[:, 1]
-                auc = float(roc_auc_score(y_val, probs)) if len(np.unique(y_val)) > 1 else 0.5
-                aucs.append(auc)
-            except Exception as e:
-                logger.debug(f"CV fold failed: {e}")
-                continue
-
-        if not aucs:
-            return {"mean_auc": 0.0, "std_auc": 0.0, "n_splits": 0}
-
-        return {"mean_auc": float(np.mean(aucs)), "std_auc": float(np.std(aucs)), "n_splits": len(aucs)}
-
-    def _purged_kfold_cv(self, X: np.ndarray, y: np.ndarray, sample_dates: List[pd.Timestamp], n_splits: int = 5, embargo_days: int = 2, forward_days: int = 5, trading_calendar: Optional[List[pd.Timestamp]] = None) -> Dict:
-        """
-        实现 Purged K-Fold with embargo (交易日级 embargo)
-        返回带每折指标与图像文件名(report dict)
-        """
-        from sklearn.metrics import roc_auc_score, roc_curve, auc as auc_fn
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        import io
-        import base64
-
-        report = {"folds": [], "mean_auc": 0.0, "std_auc": 0.0, "n_folds": 0}
-
-        if X.size == 0 or len(y) < 20 or len(sample_dates) != len(y):
-            return report
-
-        # convert dates to pandas Series
-        dates = pd.to_datetime(pd.Series(sample_dates))
-        unique_dates = sorted(dates.unique())
-        if len(unique_dates) < n_splits:
-            n_splits = max(1, len(unique_dates) // 2)
-
-        # Determine trading-day index mapping.
-        trading_index = None
-        if trading_calendar is not None:
-            try:
-                trading_index = pd.to_datetime(sorted(pd.to_datetime(list(trading_calendar))))
-            except Exception:
-                trading_index = None
-
-        # If trading_calendar not provided, try to fetch from market index configured in lgb_config
-        if trading_index is None:
-            try:
-                cal_index_code = self.lgb_config.get("calendar_index", None)
-                if cal_index_code:
-                    idx_df = self.data_fetcher.fetch_market_index(cal_index_code)
-                else:
-                    idx_df = self.data_fetcher.fetch_market_index()
-                if idx_df is not None and not idx_df.empty:
-                    trading_index = pd.to_datetime(idx_df.index.unique())
-                    trading_index = trading_index.sort_values()
-            except Exception:
-                trading_index = None
-
-        # Fallback: use unique_dates as trading index (treating them as trading days)
-        if trading_index is None:
-            trading_index = pd.to_datetime(sorted(unique_dates))
-
-        # Build date -> rank mapping using trading_index. For sample dates not in trading_index, map to the previous trading day rank if exists, else -1
-        trading_index = pd.DatetimeIndex(trading_index)
-        date_to_rank = {}
-        for i, t in enumerate(trading_index):
-            date_to_rank[pd.to_datetime(t)] = int(i)
-
-        def date_rank_lookup(d):
-            d = pd.to_datetime(d)
-            if d in date_to_rank:
-                return date_to_rank[d]
-            # find previous trading day index
-            pos = trading_index.searchsorted(d)
-            if pos == 0:
-                return -1
-            return int(pos - 1)
-
-        ranks = dates.map(lambda d: date_rank_lookup(d)).astype(int)
-
-        # split unique dates into contiguous folds
-        date_groups = np.array_split(np.array(unique_dates, dtype='datetime64[ns]'), n_splits)
-
-        aucs = []
-        overall_val_y = []
-        overall_val_prob = []
-
-        for i, val_dates in enumerate(date_groups):
-            if len(val_dates) == 0:
-                continue
-            val_start = pd.to_datetime(val_dates[0])
-            val_end = pd.to_datetime(val_dates[-1])
-
-            # validation indices
-            val_mask = dates.isin(val_dates)
-            val_idx = np.where(val_mask)[0]
-
-            # training indices: dates strictly before val_start
-            train_mask = dates < val_start
-            train_idx = np.where(train_mask)[0].tolist()
-
-            # compute rank based embargo: purge training samples where (sample_rank + forward_days) >= (val_start_rank - embargo_days)
-            val_start_rank = date_to_rank.get(pd.to_datetime(val_start), 0)
-            embargo = int(embargo_days)
-            fwd = int(forward_days)
-
-            purged_train_idx = []
-            for idx in train_idx:
-                sample_rank = int(ranks.iloc[idx])
-                if sample_rank < 0:
-                    continue
-                if (sample_rank + fwd) >= (val_start_rank - embargo):
-                    # purge
-                    continue
-                purged_train_idx.append(idx)
-
-            train_idx = purged_train_idx
-
-            if len(train_idx) < 20 or len(val_idx) < 5:
-                # skip fold if too small
-                continue
-
-            X_tr, X_val = X[train_idx], X[val_idx]
-            y_tr, y_val = y[train_idx], y[val_idx]
-
-            # train temporary model
-            try:
-                model = lgb.LGBMClassifier(**{
-                    "objective": "binary",
-                    "n_estimators": max(50, int(self.lgb_config.get("n_estimators", 500) // 5)),
-                    "learning_rate": self.lgb_config.get("learning_rate", 0.05),
-                    "random_state": 42,
-                })
-                model.fit(X_tr, y_tr)
-                probs = model.predict_proba(X_val)[:, 1]
-                auc_score = float(roc_auc_score(y_val, probs)) if len(np.unique(y_val)) > 1 else 0.5
-            except Exception as e:
-                logger.debug(f"Purged CV fold training failed: {e}")
-                continue
-
-            # record overall
-            overall_val_y.extend(y_val.tolist())
-            overall_val_prob.extend(probs.tolist())
-
-            # compute ROC curve for fold
-            try:
-                fpr, tpr, _ = roc_curve(y_val, probs)
-                fold_auc = auc_fn(fpr, tpr)
-            except Exception:
-                fpr, tpr, fold_auc = [], [], auc_score
-
-            # save fold ROC plot
-            fold_img_name = None
-            try:
-                fig, ax = plt.subplots(figsize=(4, 4))
-                ax.plot(fpr, tpr, label=f'ROC fold {i} (AUC={fold_auc:.3f})')
-                ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
-                ax.set_xlabel('FPR')
-                ax.set_ylabel('TPR')
-                ax.set_title(f'ROC Fold {i}')
-                ax.legend(loc='lower right')
-                img_path = self.model_dir / f"screening_cv_fold_{i}.png"
-                fig.tight_layout()
-                fig.savefig(img_path)
-                plt.close(fig)
-                fold_img_name = str(img_path.name)
-            except Exception as e:
-                logger.debug(f"无法保存折线图: {e}")
-                fold_img_name = None
-
-            train_pos = int(y_tr.sum())
-            train_neg = int(len(y_tr) - train_pos)
-            val_pos = int(y_val.sum())
-            val_neg = int(len(y_val) - val_pos)
-
-            fold_report = {
-                "fold": i,
-                "n_train": len(train_idx),
-                "n_val": len(val_idx),
-                "train_pos": train_pos,
-                "train_neg": train_neg,
-                "val_pos": val_pos,
-                "val_neg": val_neg,
-                "auc": float(auc_score),
-                "val_start": str(val_start.date()),
-                "val_end": str(val_end.date()),
-                "roc_image": fold_img_name,
-            }
-            report["folds"].append(fold_report)
-            aucs.append(float(auc_score))
-
-        # overall ROC across all folds
-        if overall_val_y and overall_val_prob:
-            try:
-                fpr_o, tpr_o, _ = roc_curve(overall_val_y, overall_val_prob)
-                overall_auc = float(auc_fn(fpr_o, tpr_o))
-                # save overall ROC plot
-                try:
-                    fig, ax = plt.subplots(figsize=(6, 6))
-                    ax.plot(fpr_o, tpr_o, label=f'Overall ROC (AUC={overall_auc:.3f})')
-                    ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
-                    ax.set_xlabel('FPR')
-                    ax.set_ylabel('TPR')
-                    ax.set_title('Overall ROC')
-                    ax.legend(loc='lower right')
-                    img_path = self.model_dir / "screening_cv_overall_roc.png"
-                    fig.tight_layout()
-                    fig.savefig(img_path)
-                    plt.close(fig)
-                    report['overall_roc_image'] = str(img_path.name)
-                except Exception as e:
-                    logger.debug(f"无法保存总体ROC图: {e}")
-                    report['overall_roc_image'] = None
-            except Exception as e:
-                logger.debug(f"总体ROC计算失败: {e}")
-
-        if aucs:
-            report["mean_auc"] = float(np.mean(aucs))
-            report["std_auc"] = float(np.std(aucs))
-            report["n_folds"] = len(aucs)
-
-        report['generated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            model = lgb.LGBMRanker(**params)
+            model.fit(X[train_idx], y[train_idx], group=train_groups)
+            scores = model.predict(X[val_idx])
+            metrics = rank_metrics(dates[val_idx], raw_returns[val_idx], scores)
+            report["folds"].append({
+                "fold": int(fold), "n_train": int(len(train_idx)),
+                "n_val": int(len(val_idx)), "train_groups": train_groups,
+                "validation_groups": val_groups, "val_start": val_start,
+                "val_end": val_end, **metrics,
+            })
+        report["n_folds"] = len(report["folds"])
+        if report["folds"]:
+            ics = [x["rank_ic"] for x in report["folds"] if x["rank_ic"] is not None]
+            spreads = [x["top_bottom_return"] for x in report["folds"] if x["top_bottom_return"] is not None]
+            report["mean_rank_ic"] = float(np.mean(ics)) if ics else None
+            report["mean_top_bottom_return"] = float(np.mean(spreads)) if spreads else None
         return report
 
-    def _train_model(
-        self,
-        valid_stocks: List[str],
-        all_features: Dict[str, pd.DataFrame],
-        all_labels: Dict[str, pd.Series]
-    ) -> None:
-        """训练LightGBM模型"""
+    def _train_model(self, valid_stocks, all_features, all_labels) -> None:
+        """Train LambdaRank with purged walk-forward CV and a final untouched OOS period."""
         if not HAS_LIGHTGBM:
-            return
+            raise RuntimeError("LightGBM is required for Alpha Ranker training")
+        from data.alpha_training import rank_metrics, split_development_oos
 
-        logger.info("开始训练LightGBM模型...")
-
-        # 构建训练数据 (lookback_days 可配置, 默认 30 个交易日窗口)
-        lookback_days = int(self.lgb_config.get("lookback_days", 30))
-        X, y, stock_codes, feature_names, sample_dates = self.build_training_dataset(valid_stocks, all_features, all_labels, lookback_days=lookback_days, min_samples=100)
-
-        if X.size == 0 or y.size == 0:
-            logger.warning("未能构建有效训练集,跳过训练")
-            return
-
-        self.feature_names = feature_names
-        logger.info(f"训练数据: {X.shape[0]} samples, {X.shape[1]} features")
-        logger.info(f"正样本比例: {y.mean():.2%}")
-
-        # 验证: 使用 Purged K-Fold + Embargo
-        embargo_days = int(self.lgb_config.get("embargo_days", 2))
+        X, y, raw_returns, stock_codes, feature_names, sample_dates, groups = self.build_training_dataset(
+            valid_stocks, all_features, all_labels,
+            lookback_days=int(self.lgb_config.get("lookback_days", 0)),
+            min_samples=int(self.lgb_config.get("min_samples", 100)),
+        )
+        dates = pd.DatetimeIndex(pd.to_datetime(sample_dates)).normalize()
+        start_date, end_date = dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
+        calendar = pd.DatetimeIndex(pd.to_datetime(
+            self.data_fetcher.fetch_trading_calendar(start_date, end_date)
+        )).normalize()
         forward_days = int(self.lgb_config.get("forward_days", 5))
-        n_splits = int(self.lgb_config.get("n_splits", 5))
+        embargo_days = int(self.lgb_config.get("embargo_days", 2))
+        dev_idx, oos_idx, oos_start = split_development_oos(
+            sample_dates, calendar,
+            oos_fraction=float(self.lgb_config.get("oos_fraction", 0.2)),
+            forward_days=forward_days, embargo_days=embargo_days,
+        )
+        if len(dev_idx) < int(self.lgb_config.get("min_samples", 100)) or len(oos_idx) < 20:
+            raise ValueError("development or independent OOS sample is too small")
 
-        cv_result = self._purged_kfold_cv(X, y, sample_dates, n_splits=n_splits, embargo_days=embargo_days, forward_days=forward_days)
-        logger.info(f"Purged K-Fold CV 结果: mean_auc={cv_result.get('mean_auc'):.4f}, std={cv_result.get('std_auc'):.4f}, folds={cv_result.get('n_folds')}")
+        cv = self._purged_kfold_cv(
+            X[dev_idx], y[dev_idx], [sample_dates[i] for i in dev_idx],
+            raw_returns[dev_idx], calendar,
+            n_splits=int(self.lgb_config.get("n_splits", 5)),
+            embargo_days=embargo_days, forward_days=forward_days,
+        )
+        if cv["n_folds"] < max(2, int(self.lgb_config.get("n_splits", 5)) - 1):
+            raise RuntimeError(f"insufficient valid purged walk-forward folds: {cv['n_folds']}")
 
-        # 保存 CV 报告到文件（JSON + 简易 HTML）
-        try:
-            report_path = self.model_dir / "screening_cv_report.json"
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(cv_result, f, ensure_ascii=False, indent=2)
-            # 生成带图像的 HTML 报告 (将图像保存在 model_dir 下)
-            html_path = self.model_dir / "screening_cv_report.html"
-            try:
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write('<html><head><meta charset="utf-8"><title>Screening CV Report</title></head><body>')
-                    f.write(f'<h2>Purged K-Fold CV Report</h2>')
-                    f.write(f'<p>mean_auc: {cv_result.get("mean_auc"):.4f}, std: {cv_result.get("std_auc"):.4f}, folds: {cv_result.get("n_folds")}</p>')
-
-                    # 总体ROC图 (如果存在)
-                    overall_img = cv_result.get('overall_roc_image')
-                    if overall_img:
-                        f.write('<h3>Overall ROC</h3>')
-                        f.write(f'<img src="{overall_img}" alt="overall roc" style="max-width:600px; height:auto;"><br>')
-
-                    f.write('<h3>Per-fold details</h3>')
-                    f.write('<table border="1" cellpadding="4"><tr><th>fold</th><th>n_train</th><th>n_val</th><th>train_pos</th><th>train_neg</th><th>val_pos</th><th>val_neg</th><th>auc</th><th>val_start</th><th>val_end</th><th>ROC</th></tr>')
-                    for fold in cv_result.get('folds', []):
-                        f.write('<tr>')
-                        f.write(f"<td>{fold.get('fold')}</td>")
-                        f.write(f"<td>{fold.get('n_train')}</td>")
-                        f.write(f"<td>{fold.get('n_val')}</td>")
-                        f.write(f"<td>{fold.get('train_pos')}</td>")
-                        f.write(f"<td>{fold.get('train_neg')}</td>")
-                        f.write(f"<td>{fold.get('val_pos')}</td>")
-                        f.write(f"<td>{fold.get('val_neg')}</td>")
-                        f.write(f"<td>{fold.get('auc'):.4f}</td>")
-                        f.write(f"<td>{fold.get('val_start')}</td>")
-                        f.write(f"<td>{fold.get('val_end')}</td>")
-                        roc_img = fold.get('roc_image')
-                        if roc_img:
-                            f.write(f"<td><img src=\"{roc_img}\" alt=\"roc_fold_{fold.get('fold')}\" style=\"max-width:200px; height:auto;\"></td>")
-                        else:
-                            f.write('<td>n/a</td>')
-                        f.write('</tr>')
-                    f.write('</table>')
-                    f.write(f'<p>Report generated at: {cv_result.get("generated_at")}</p>')
-                    f.write('</body></html>')
-                logger.info(f"CV报告已保存到: {report_path} 和 {html_path}")
-            except Exception as e:
-                logger.error(f"保存HTML CV报告失败: {e}")
-        except Exception as e:
-            logger.error(f"保存CV报告失败: {e}")
-
-        min_auc = float(self.lgb_config.get("min_cv_auc", 0.60))
-        if cv_result.get("mean_auc", 0) < min_auc:
-            logger.warning(f"Purged CV mean AUC {cv_result.get('mean_auc'):.4f} 小于阈值 {min_auc}, 不建议训练/部署模型")
-            # 仍可选择继续训练，但为了稳健性这里直接返回不训练
-            return
-
-        # LightGBM参数
+        dates_dev = dates[dev_idx]
+        group_sizes = [int((dates_dev == d).sum()) for d in dates_dev.unique()]
         params = {
-            "objective": "binary",
-            "metric": "auc",
-            "boosting_type": "gbdt",
+            "objective": "lambdarank", "metric": "ndcg",
+            "ndcg_eval_at": [5, 10], "verbosity": -1,
             "learning_rate": self.lgb_config.get("learning_rate", 0.05),
             "n_estimators": self.lgb_config.get("n_estimators", 500),
-            "max_depth": self.lgb_config.get("max_depth", 6),
-            "num_leaves": self.lgb_config.get("num_leaves", 63),
-            "min_child_samples": self.lgb_config.get("min_child_samples", 100),
-            "feature_fraction": self.lgb_config.get("feature_fraction", 0.8),
-            "bagging_fraction": self.lgb_config.get("bagging_fraction", 0.8),
-            "bagging_freq": self.lgb_config.get("bagging_freq", 5),
-            "reg_alpha": self.lgb_config.get("reg_alpha", 0.1),
-            "reg_lambda": self.lgb_config.get("reg_lambda", 0.1),
-            "verbose": -1,
-            "random_state": 42,
-            "n_jobs": -1,
+            "num_leaves": self.lgb_config.get("num_leaves", 31),
+            "max_depth": self.lgb_config.get("max_depth", -1),
+            "min_child_samples": self.lgb_config.get("min_child_samples", 30),
+            "random_state": 42, "n_jobs": -1,
         }
+        model = lgb.LGBMRanker(**params)
+        model.fit(X[dev_idx], y[dev_idx], group=group_sizes)
+        oos = rank_metrics(dates[oos_idx], raw_returns[oos_idx], model.predict(X[oos_idx]))
+        min_oos_rank_ic = float(self.lgb_config.get("min_oos_rank_ic", 0.0))
+        if oos["rank_ic"] is None or oos["rank_ic"] < min_oos_rank_ic:
+            raise RuntimeError(
+                f"independent OOS RankIC {oos['rank_ic']} is below required {min_oos_rank_ic}; refusing deployment"
+            )
 
-        # 训练最终模型
-        self.model = lgb.LGBMClassifier(**params)
-        self.model.fit(
-            X, y,
-            eval_set=[(X, y)],
-            callbacks=[lgb.log_evaluation(period=0)],  # 静默训练
-        )
-
-        self.is_trained = True
-
-        # 保存特征重要性
-        importance = dict(zip(
-            self.feature_names,
-            self.model.feature_importances_.tolist()
-        ))
+        self.feature_names = feature_names
+        importance = dict(zip(feature_names, model.feature_importances_.tolist()))
+        oos_dates = dates[oos_idx]
+        oos_date_counts = pd.Series(oos_dates).value_counts().sort_index()
+        oos_stock_codes = np.asarray(stock_codes, dtype=object)[oos_idx]
+        oos_coverage = {
+            "date_start": str(oos_dates.min().date()),
+            "date_end": str(oos_dates.max().date()),
+            "trading_dates": int(oos_dates.nunique()),
+            "samples": int(len(oos_idx)),
+            "unique_stocks": int(pd.Series(oos_stock_codes).nunique()),
+            "daily_samples_min": int(oos_date_counts.min()),
+            "daily_samples_median": float(oos_date_counts.median()),
+            "daily_samples_max": int(oos_date_counts.max()),
+        }
         self.model = {
-            "metrics": {"trained": True, "samples": len(X), "positive_rate": float(y.mean()), "cv": cv_result},
-            "feature_importance": importance,
-            "model_obj": self.model,  # 内部引用
+            "metrics": {"trained": True, "samples": int(len(dev_idx)), "cv": cv,
+                        "oos": oos, "oos_start": str(oos_start.date()),
+                        "oos_end": str(dates[oos_idx].max().date()),
+                        "oos_samples": int(len(oos_idx)),
+                        "oos_coverage": oos_coverage},
+            "feature_importance": importance, "model_obj": model,
         }
-
-        # 持久化
-        model_data = {
-            "is_trained": True,
-            "feature_names": self.feature_names,
-            "feature_importance": importance,
-            "params": params,
-            "train_date": datetime.now().strftime("%Y-%m-%d"),
-            "samples": int(X.shape[0]),
-            "cv": cv_result,
+        self.is_trained = True
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "is_trained": True, "model_type": "LGBMRanker",
+            "feature_names": feature_names, "feature_importance": importance,
+            "params": params, "train_date": datetime.now().strftime("%Y-%m-%d"),
+            **self.model["metrics"],
         }
-
-        # 保存元数据
-        meta_path = self.model_dir / "screening_meta.json"
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(model_data, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"LightGBM模型训练完成 | 样本数: {len(X)} | 特征数: {X.shape[1]} | CV AUC: {cv_result.get('mean_auc'):.4f}")
+        with open(self.model_dir / "screening_meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        with open(self.model_dir / "screening_cv_report.json", "w", encoding="utf-8") as f:
+            json.dump({"cv": cv, "oos": oos}, f, ensure_ascii=False, indent=2)
+        logger.info(f"LambdaRank trained; CV RankIC={cv.get('mean_rank_ic')}, OOS RankIC={oos.get('rank_ic')}")
 
     def _predict_scores(self, stock_codes: List[str], date: str) -> Dict[str, float]:
         """
@@ -716,6 +408,7 @@ class ScreeningLayer:
 
             # 构建当日特征 (使用 adjust="qfq" 匹配训练阶段缓存)
             X_day = []
+            scored_codes = []
             for code in stock_codes:
                 df = self.data_fetcher.fetch_stock_data(code, start_date="2021-01-01", end_date=date, adjust="qfq")
                 if df.empty:
@@ -736,17 +429,18 @@ class ScreeningLayer:
                     overlap = feat_vals.index.intersection(aligned.index)
                     aligned[overlap] = feat_vals[overlap]
                     X_day.append(aligned.values)
+                    scored_codes.append(code)
 
             if len(X_day) == 0:
                 return self._scoring_method(stock_codes, date)
 
             X_day = np.nan_to_num(np.array(X_day, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
-            # 预测概率
-            probs = model_obj.predict_proba(X_day)[:, 1]
+            # Ranker emits a continuous cross-sectional ranking score (not a probability).
+            rank_scores = model_obj.predict(X_day)
 
-            for code, prob in zip(stock_codes, probs):
-                scores[code] = float(prob)
+            for code, score in zip(scored_codes, rank_scores):
+                scores[code] = float(score)
 
         except Exception as e:
             logger.error(f"LightGBM预测失败: {e}, 使用评分法回退")
@@ -860,7 +554,7 @@ class ScreeningLayer:
 
         model_obj = self.model.get("model_obj", self.model) if isinstance(self.model, dict) else self.model
 
-        # LightGBM 4.x: LGBMClassifier exposes the booster via `.booster_`
+        # LightGBM 4.x: LGBMRanker exposes the booster via `.booster_`
         # and only the Booster has `save_model`. Fall back gracefully.
         booster = getattr(model_obj, "booster_", None) or (
             model_obj if hasattr(model_obj, "save_model") else None
